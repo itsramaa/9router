@@ -83,6 +83,33 @@ export function resolveDefaultPort() {
   return isNaN(p) ? 8765 : p;
 }
 
+/**
+ * Resolve Python executable.
+ * Priority: explicit override → venv/Scripts/python.exe inside scriptsDir → system python
+ */
+export function resolvePython(scriptsDir, explicitPath) {
+  if (explicitPath?.trim()) return explicitPath.trim();
+
+  // Auto-detect venv inside bulk-accounts dir
+  const venvPython = os.platform() === "win32"
+    ? path.join(scriptsDir, "venv", "Scripts", "python.exe")
+    : path.join(scriptsDir, "venv", "bin", "python");
+
+  if (fs.existsSync(venvPython)) {
+    return venvPython;
+  }
+
+  return os.platform() === "win32" ? "python" : "python3";
+}
+
+/** Check if venv exists inside scriptsDir */
+export function hasVenv(scriptsDir) {
+  const venvPython = os.platform() === "win32"
+    ? path.join(scriptsDir, "venv", "Scripts", "python.exe")
+    : path.join(scriptsDir, "venv", "bin", "python");
+  return fs.existsSync(venvPython);
+}
+
 // ── Setup commands ───────────────────────────────────────────────────────────
 
 function spawnSetupCmd(python, args, cwd, key) {
@@ -142,15 +169,44 @@ async function checkSetupInstalled(python, cwd) {
 
 /**
  * Run a setup action.
- * action: "check" | "install-deps" | "install-camoufox" | "install-all"
+ * action: "check" | "create-venv" | "install-deps" | "install-camoufox" | "install-all"
  */
 export async function runSetup(action, { pythonPath, scriptsDir } = {}) {
-  const python = pythonPath?.trim() || (os.platform() === "win32" ? "python" : "python3");
   const dir    = resolveScriptsDir(scriptsDir);
+  const python = resolvePython(dir, pythonPath);
+
+  pushLog(`[setup] Python: ${python}`, "system");
+  pushLog(`[setup] Dir: ${dir}`, "system");
 
   if (action === "check") {
     await checkSetupInstalled(python, dir);
     return getSetupState();
+  }
+
+  if (action === "create-venv") {
+    // Use system python to create the venv (not the venv python itself)
+    const sysPython = pythonPath?.trim() || (os.platform() === "win32" ? "python" : "python3");
+    pushLog("[setup] Creating virtual environment at ./venv ...", "system");
+    return new Promise((resolve, reject) => {
+      const proc = spawn(sysPython, ["-m", "venv", "venv"], {
+        cwd: dir, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env }, windowsHide: true,
+      });
+      proc.stdout.on("data", (c) => c.toString().split("\n").forEach((l) => l.trim() && pushLog(l, "stdout")));
+      proc.stderr.on("data", (c) => c.toString().split("\n").forEach((l) => l.trim() && pushLog(l, "stderr")));
+      proc.on("error", (e) => { pushLog(`[setup] venv error: ${e.message}`, "system"); reject(e); });
+      proc.on("exit", (code) => {
+        if (code === 0) {
+          pushLog("[setup] ✓ venv created — run Install Deps next", "system");
+          // Reset deps/camoufox so user installs into new venv
+          _setup.deps = "idle"; _setup.camoufox = "idle";
+          _state.emitter.emit("setup", { ..._setup });
+          resolve({ ok: true });
+        } else {
+          pushLog(`[setup] ✗ venv creation failed (code ${code})`, "system");
+          reject(new Error("venv creation failed"));
+        }
+      });
+    });
   }
 
   if (action === "install-deps") {
@@ -181,7 +237,7 @@ export async function startServer({ pythonPath, scriptsDir, port } = {}) {
 
   const resolvedDir  = resolveScriptsDir(scriptsDir);
   const resolvedPort = port || resolveDefaultPort();
-  const python       = pythonPath?.trim() || (os.platform() === "win32" ? "python" : "python3");
+  const python       = resolvePython(resolvedDir, pythonPath);
 
   if (!resolvedDir) throw new Error("scriptsDir is required");
 
@@ -209,8 +265,9 @@ export async function startServer({ pythonPath, scriptsDir, port } = {}) {
   _state.logs       = [];
   setStatus("starting");
 
-  pushLog(`[manager] Spawning: ${python} server.py --port ${resolvedPort}`, "system");
-  pushLog(`[manager] Working dir: ${resolvedDir}`, "system");
+  pushLog(`[manager] Python: ${python}`, "system");
+  pushLog(`[manager] Spawning: server.py --port ${resolvedPort}`, "system");
+  pushLog(`[manager] Dir: ${resolvedDir}`, "system");
 
   const proc = spawn(python, ["server.py", "--port", String(resolvedPort)], {
     cwd: resolvedDir,

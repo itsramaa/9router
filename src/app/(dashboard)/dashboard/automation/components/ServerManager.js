@@ -40,23 +40,24 @@ function formatUptime(ms) {
 }
 
 export default function ServerManager({ onServerReady, onServerStateChange }) {
-  const [cfg, setCfg]               = useState({ pythonPath: "", port: "" });
-  const [envPort, setEnvPort]       = useState(8765);
-  const [status, setStatus]         = useState("stopped");
-  const [pid, setPid]               = useState(null);
-  const [uptime, setUptime]         = useState(null);
-  const [startedAt, setStartedAt]   = useState(null);
-  const [setup, setSetup]           = useState({ deps: "idle", camoufox: "idle" });
-  const [setupBusy, setSetupBusy]   = useState(false);
-  const [error, setError]           = useState("");
-  const [logs, setLogs]             = useState([]);
-  const [logsOpen, setLogsOpen]     = useState(false);
-  const [setupOpen, setSetupOpen]   = useState(false);
-  const [busy, setBusy]             = useState(false);
-  const logBottomRef                = useRef(null);
-  const esRef                       = useRef(null);
-  const pollRef                     = useRef(null);
-  const prevStatus                  = useRef("stopped");
+  const [cfg, setCfg]             = useState({ pythonPath: "", port: "" });
+  const [envPort, setEnvPort]     = useState(8765);
+  const [status, setStatus]       = useState("stopped");
+  const [pid, setPid]             = useState(null);
+  const [uptime, setUptime]       = useState(null);
+  const [startedAt, setStartedAt] = useState(null);
+  const [setup, setSetup]         = useState({ deps: "idle", camoufox: "idle" });
+  const [hasVenv, setHasVenv]     = useState(false);
+  const [setupBusy, setSetupBusy] = useState(false);
+  const [error, setError]         = useState("");
+  const [logs, setLogs]           = useState([]);
+  const [logsOpen, setLogsOpen]   = useState(false);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [busy, setBusy]           = useState(false);
+  const logBottomRef              = useRef(null);
+  const esRef                     = useRef(null);
+  const pollRef                   = useRef(null);
+  const prevStatus                = useRef("stopped");
 
   useEffect(() => { setCfg(loadCfg()); }, []);
 
@@ -95,8 +96,8 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
       setStartedAt(data.startedAt);
       if (data.setup) setSetup(data.setup);
       if (data.envPort) setEnvPort(data.envPort);
+      if (data.hasVenv !== undefined) setHasVenv(data.hasVenv);
 
-      // Notify parent of state changes
       if (data.status !== prevStatus.current) {
         prevStatus.current = data.status;
         onServerStateChange?.(data.status);
@@ -132,6 +133,8 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, pythonPath: cfg.pythonPath || undefined }),
       });
+      // After create-venv, refresh hasVenv status
+      if (action === "create-venv") await pollStatus();
     } catch (e) { setError(e.message); }
     finally { setSetupBusy(false); }
   }
@@ -143,11 +146,7 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
     try {
       const res = await fetch("/api/automation/server", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "start",
-          pythonPath: cfg.pythonPath || undefined,
-          port: Number(effectivePort) || undefined,
-        }),
+        body: JSON.stringify({ action: "start", pythonPath: cfg.pythonPath || undefined, port: Number(effectivePort) || undefined }),
       });
       const data = await res.json();
       if (!data.ok) setError(data.error || "Failed to start");
@@ -158,15 +157,11 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
 
   async function handleStop() {
     setBusy(true);
-    try {
-      await fetch("/api/automation/server", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "stop" }),
-      });
-    } finally { setBusy(false); }
+    try { await fetch("/api/automation/server", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "stop" }) }); }
+    finally { setBusy(false); }
   }
 
-  const st         = STATUS_CFG[status] ?? STATUS_CFG.stopped;
+  const st        = STATUS_CFG[status] ?? STATUS_CFG.stopped;
   const isRunning  = status === "running";
   const isBusy     = status === "starting" || status === "stopping" || busy;
   const canStart   = !isBusy && (status === "stopped" || status === "error");
@@ -190,10 +185,7 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
             {isRunning && pid && <span className="text-[10px] text-text-muted font-mono">pid:{pid}</span>}
             {isRunning && uptime != null && <span className="text-[10px] text-green-600/80 dark:text-green-400/70">↑ {formatUptime(uptime)}</span>}
             {needsSetup && !isRunning && (
-              <button
-                onClick={() => setSetupOpen(true)}
-                className="text-[10px] text-amber-500 flex items-center gap-0.5 hover:underline cursor-pointer"
-              >
+              <button onClick={() => setSetupOpen(true)} className="text-[10px] text-amber-500 flex items-center gap-0.5 hover:underline cursor-pointer">
                 <span className="material-symbols-outlined text-[11px]">warning</span>
                 Setup required
               </button>
@@ -202,51 +194,35 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
           <p className="text-[11px] text-text-muted truncate">
             {isRunning
               ? `Port :${effectivePort} · WS connected · Keys auto-injected to DB`
-              : "Python harvester — bundled at ./bulk-accounts/"}
+              : hasVenv ? "Python harvester — using ./bulk-accounts/venv/" : "Python harvester — bundled at ./bulk-accounts/"}
           </p>
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          {/* Setup button — only show when not fully installed or explicitly opened */}
           {(needsSetup || setupOpen) && (
-            <button
-              onClick={() => setSetupOpen(v => !v)}
-              className={cn("flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer",
-                setupOpen
-                  ? "border-primary/30 bg-primary/10 text-primary"
-                  : "border-amber-400/40 text-amber-600 dark:text-amber-400 hover:bg-amber-400/10"
-              )}
-            >
+            <button onClick={() => setSetupOpen(v => !v)} className={cn(
+              "flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer",
+              setupOpen ? "border-primary/30 bg-primary/10 text-primary" : "border-amber-400/40 text-amber-600 dark:text-amber-400 hover:bg-amber-400/10"
+            )}>
               <span className="material-symbols-outlined text-[14px]">build</span>
               Setup
             </button>
           )}
-
-          <button
-            onClick={() => setLogsOpen(v => !v)}
-            className={cn("flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer",
-              logsOpen ? "border-primary/30 bg-primary/10 text-primary" : "border-border-subtle text-text-muted hover:bg-surface-2 hover:text-text-main"
-            )}
-          >
+          <button onClick={() => setLogsOpen(v => !v)} className={cn(
+            "flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer",
+            logsOpen ? "border-primary/30 bg-primary/10 text-primary" : "border-border-subtle text-text-muted hover:bg-surface-2 hover:text-text-main"
+          )}>
             <span className="material-symbols-outlined text-[14px]">article</span>
             Logs
             {logs.length > 0 && <span className="px-1 rounded-full bg-surface-2 text-text-muted text-[10px] font-mono">{logs.length}</span>}
           </button>
-
           {canStop && (
-            <button onClick={handleStop} disabled={!canStop}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-500/30 text-red-500 text-xs font-semibold hover:bg-red-500/10 transition-colors disabled:opacity-30 cursor-pointer"
-            >
+            <button onClick={handleStop} disabled={!canStop} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-500/30 text-red-500 text-xs font-semibold hover:bg-red-500/10 transition-colors disabled:opacity-30 cursor-pointer">
               <span className="material-symbols-outlined text-[14px]">stop</span>Stop
             </button>
           )}
-
-          <button onClick={handleStart} disabled={!canStart}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 transition-colors disabled:opacity-30 cursor-pointer shadow-[var(--shadow-warm)]"
-          >
-            <span className={cn("material-symbols-outlined text-[14px]", isBusy ? "animate-spin" : "")}>
-              {isBusy ? "sync" : "play_arrow"}
-            </span>
+          <button onClick={handleStart} disabled={!canStart} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 transition-colors disabled:opacity-30 cursor-pointer shadow-[var(--shadow-warm)]">
+            <span className={cn("material-symbols-outlined text-[14px]", isBusy ? "animate-spin" : "")}>{isBusy ? "sync" : "play_arrow"}</span>
             {status === "starting" ? "Starting..." : status === "stopping" ? "Stopping..." : "Start"}
           </button>
         </div>
@@ -280,6 +256,34 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
           </div>
 
           <div className="space-y-2">
+            {/* venv row */}
+            <div className="flex items-center gap-3 px-3 py-2 rounded-lg border border-border-subtle bg-surface">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className={cn("w-2 h-2 rounded-full shrink-0", hasVenv ? "bg-green-500" : "bg-surface-2 border border-border-subtle")} />
+                  <span className="text-xs font-semibold text-text-main">Virtual Environment (venv)</span>
+                  <span className={cn("text-[10px] font-medium", hasVenv ? "text-green-600 dark:text-green-400" : "text-text-muted")}>
+                    {hasVenv ? "Found at ./venv/" : "Not found — using system Python"}
+                  </span>
+                </div>
+                <p className="text-[10px] text-text-muted mt-0.5 ml-4">
+                  {hasVenv ? "Deps will install into venv automatically" : "Optional — creates isolated ./bulk-accounts/venv/"}
+                </p>
+              </div>
+              <button
+                onClick={() => runSetupAction("create-venv")}
+                disabled={setupBusy || hasVenv}
+                className={cn("px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer shrink-0",
+                  hasVenv
+                    ? "border border-green-500/30 text-green-600 dark:text-green-400 cursor-default"
+                    : "bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-40"
+                )}
+              >
+                {hasVenv ? "Active ✓" : "Create venv"}
+              </button>
+            </div>
+
+            {/* deps row */}
             <div className="flex items-center gap-3 px-3 py-2 rounded-lg border border-border-subtle bg-surface">
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
@@ -304,6 +308,7 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
               </button>
             </div>
 
+            {/* camoufox row */}
             <div className="flex items-center gap-3 px-3 py-2 rounded-lg border border-border-subtle bg-surface">
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
@@ -329,17 +334,15 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
             </div>
           </div>
 
-          {/* Python path override — only when needed, collapsed by default */}
+          {/* Python override — collapsed */}
           <details className="group">
             <summary className="text-[10px] text-text-muted cursor-pointer hover:text-text-main list-none flex items-center gap-1">
               <span className="material-symbols-outlined text-[12px] group-open:rotate-90 transition-transform">chevron_right</span>
               Advanced — Python executable override
             </summary>
             <div className="mt-2 pl-4">
-              <input
-                type="text" value={cfg.pythonPath}
-                onChange={(e) => handleCfgChange("pythonPath", e.target.value)}
-                placeholder="python  (default, auto-detected)"
+              <input type="text" value={cfg.pythonPath} onChange={(e) => handleCfgChange("pythonPath", e.target.value)}
+                placeholder="python  (auto-detected)"
                 className="w-full text-xs font-mono bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-text-main placeholder:text-text-muted/50 focus:outline-none focus:ring-1 focus:ring-primary/40"
               />
             </div>
