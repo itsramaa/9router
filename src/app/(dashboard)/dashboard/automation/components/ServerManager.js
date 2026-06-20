@@ -10,14 +10,12 @@ const STATUS_CFG = {
   stopping: { dot: "bg-amber-400 animate-pulse",               label: "Stopping", color: "text-amber-600 dark:text-amber-400", border: "border-amber-400/30" },
   error:    { dot: "bg-red-500",                               label: "Error",    color: "text-red-500",                        border: "border-red-500/30" },
 };
-
 const SETUP_CFG = {
   idle:    { dot: "bg-surface-2 border border-border-subtle", label: "Not installed", color: "text-text-muted" },
   running: { dot: "bg-amber-400 animate-pulse",               label: "Installing...", color: "text-amber-600 dark:text-amber-400" },
   done:    { dot: "bg-green-500",                             label: "Installed",     color: "text-green-600 dark:text-green-400" },
   error:   { dot: "bg-red-500",                               label: "Failed",        color: "text-red-500" },
 };
-
 const LOG_COLORS = {
   stdout: "text-text-main",
   stderr: "text-amber-500 dark:text-amber-400",
@@ -54,10 +52,14 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
   const [logsOpen, setLogsOpen]   = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
   const [busy, setBusy]           = useState(false);
-  const logBottomRef              = useRef(null);
-  const esRef                     = useRef(null);
-  const pollRef                   = useRef(null);
-  const prevStatus                = useRef("stopped");
+
+  const logContainerRef = useRef(null);
+  const logBottomRef    = useRef(null);
+  // Track whether user has manually scrolled up — ref avoids re-renders
+  const autoScrollRef   = useRef(true);
+  const esRef           = useRef(null);
+  const pollRef         = useRef(null);
+  const prevStatus      = useRef("stopped");
 
   useEffect(() => { setCfg(loadCfg()); }, []);
 
@@ -69,9 +71,23 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
     return () => clearInterval(id);
   }, [status, startedAt]);
 
+  // Smart auto-scroll: only scroll if user hasn't scrolled up
   useEffect(() => {
-    if (logsOpen) logBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!logsOpen || !autoScrollRef.current) return;
+    logBottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs, logsOpen]);
+
+  // Reset autoScroll when logs panel opens
+  useEffect(() => {
+    if (logsOpen) autoScrollRef.current = true;
+  }, [logsOpen]);
+
+  function handleLogScroll(e) {
+    const el = e.currentTarget;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    // If user scrolled more than 60px from bottom → disable auto-scroll
+    autoScrollRef.current = distFromBottom < 60;
+  }
 
   const connectLogStream = useCallback(() => {
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
@@ -97,7 +113,6 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
       if (data.setup) setSetup(data.setup);
       if (data.envPort) setEnvPort(data.envPort);
       if (data.hasVenv !== undefined) setHasVenv(data.hasVenv);
-
       if (data.status !== prevStatus.current) {
         prevStatus.current = data.status;
         onServerStateChange?.(data.status);
@@ -112,8 +127,7 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
     pollStatus();
     connectLogStream();
     fetch("/api/automation/setup", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+      method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "check" }),
     }).then(r => r.json()).then(d => { if (d.setup) setSetup(d.setup); }).catch(() => {});
     pollRef.current = setInterval(pollStatus, 2000);
@@ -127,13 +141,12 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
   async function runSetupAction(action) {
     setSetupBusy(true);
     setLogsOpen(true);
+    autoScrollRef.current = true;
     try {
       await fetch("/api/automation/setup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, pythonPath: cfg.pythonPath || undefined }),
       });
-      // After create-venv, refresh hasVenv status
       if (action === "create-venv") await pollStatus();
     } catch (e) { setError(e.message); }
     finally { setSetupBusy(false); }
@@ -142,7 +155,7 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
   const effectivePort = cfg.port || String(envPort || 8765);
 
   async function handleStart() {
-    setError(""); setBusy(true); setLogs([]);
+    setError(""); setBusy(true); setLogs([]); autoScrollRef.current = true;
     try {
       const res = await fetch("/api/automation/server", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -197,15 +210,13 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
               : hasVenv ? "Python harvester — using ./bulk-accounts/venv/" : "Python harvester — bundled at ./bulk-accounts/"}
           </p>
         </div>
-
         <div className="flex items-center gap-2 shrink-0">
           {(needsSetup || setupOpen) && (
             <button onClick={() => setSetupOpen(v => !v)} className={cn(
               "flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer",
               setupOpen ? "border-primary/30 bg-primary/10 text-primary" : "border-amber-400/40 text-amber-600 dark:text-amber-400 hover:bg-amber-400/10"
             )}>
-              <span className="material-symbols-outlined text-[14px]">build</span>
-              Setup
+              <span className="material-symbols-outlined text-[14px]">build</span>Setup
             </button>
           )}
           <button onClick={() => setLogsOpen(v => !v)} className={cn(
@@ -217,7 +228,7 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
             {logs.length > 0 && <span className="px-1 rounded-full bg-surface-2 text-text-muted text-[10px] font-mono">{logs.length}</span>}
           </button>
           {canStop && (
-            <button onClick={handleStop} disabled={!canStop} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-500/30 text-red-500 text-xs font-semibold hover:bg-red-500/10 transition-colors disabled:opacity-30 cursor-pointer">
+            <button onClick={handleStop} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-500/30 text-red-500 text-xs font-semibold hover:bg-red-500/10 transition-colors cursor-pointer">
               <span className="material-symbols-outlined text-[14px]">stop</span>Stop
             </button>
           )}
@@ -243,20 +254,14 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
         <div className="border-t border-border-subtle bg-surface-2/30 px-4 py-4 space-y-3">
           <div className="flex items-center justify-between">
             <p className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">Python Environment Setup</p>
-            <button
-              onClick={() => runSetupAction("install-all")}
-              disabled={setupBusy || (setup.deps === "done" && setup.camoufox === "done")}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 transition-colors disabled:opacity-40 cursor-pointer"
-            >
-              <span className={cn("material-symbols-outlined text-[14px]", setupBusy ? "animate-spin" : "")}>
-                {setupBusy ? "sync" : "download"}
-              </span>
+            <button onClick={() => runSetupAction("install-all")} disabled={setupBusy || (setup.deps === "done" && setup.camoufox === "done")}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 transition-colors disabled:opacity-40 cursor-pointer">
+              <span className={cn("material-symbols-outlined text-[14px]", setupBusy ? "animate-spin" : "")}>{setupBusy ? "sync" : "download"}</span>
               {setup.deps === "done" && setup.camoufox === "done" ? "All Installed ✓" : "Install All"}
             </button>
           </div>
-
           <div className="space-y-2">
-            {/* venv row */}
+            {/* venv */}
             <div className="flex items-center gap-3 px-3 py-2 rounded-lg border border-border-subtle bg-surface">
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
@@ -266,75 +271,50 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
                     {hasVenv ? "Found at ./venv/" : "Not found — using system Python"}
                   </span>
                 </div>
-                <p className="text-[10px] text-text-muted mt-0.5 ml-4">
-                  {hasVenv ? "Deps will install into venv automatically" : "Optional — creates isolated ./bulk-accounts/venv/"}
-                </p>
+                <p className="text-[10px] text-text-muted mt-0.5 ml-4">{hasVenv ? "Deps install into venv automatically" : "Optional — isolated ./bulk-accounts/venv/"}</p>
               </div>
-              <button
-                onClick={() => runSetupAction("create-venv")}
-                disabled={setupBusy || hasVenv}
+              <button onClick={() => runSetupAction("create-venv")} disabled={setupBusy || hasVenv}
                 className={cn("px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer shrink-0",
-                  hasVenv
-                    ? "border border-green-500/30 text-green-600 dark:text-green-400 cursor-default"
-                    : "bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-40"
-                )}
-              >
+                  hasVenv ? "border border-green-500/30 text-green-600 dark:text-green-400 cursor-default" : "bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-40"
+                )}>
                 {hasVenv ? "Active ✓" : "Create venv"}
               </button>
             </div>
-
-            {/* deps row */}
+            {/* deps */}
             <div className="flex items-center gap-3 px-3 py-2 rounded-lg border border-border-subtle bg-surface">
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
                   <span className={cn("w-2 h-2 rounded-full shrink-0", SETUP_CFG[setup.deps]?.dot ?? SETUP_CFG.idle.dot)} />
                   <span className="text-xs font-semibold text-text-main">Python Dependencies</span>
-                  <span className={cn("text-[10px] font-medium", SETUP_CFG[setup.deps]?.color ?? SETUP_CFG.idle.color)}>
-                    {SETUP_CFG[setup.deps]?.label}
-                  </span>
+                  <span className={cn("text-[10px] font-medium", SETUP_CFG[setup.deps]?.color ?? SETUP_CFG.idle.color)}>{SETUP_CFG[setup.deps]?.label}</span>
                 </div>
                 <p className="text-[10px] text-text-muted mt-0.5 ml-4">pip install -r requirements-harvest.txt</p>
               </div>
-              <button
-                onClick={() => runSetupAction("install-deps")}
-                disabled={setupBusy || setup.deps === "running"}
+              <button onClick={() => runSetupAction("install-deps")} disabled={setupBusy || setup.deps === "running"}
                 className={cn("px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer shrink-0",
-                  setup.deps === "done"
-                    ? "border border-green-500/30 text-green-600 dark:text-green-400 hover:bg-green-500/10"
-                    : "bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-40"
-                )}
-              >
+                  setup.deps === "done" ? "border border-green-500/30 text-green-600 dark:text-green-400 hover:bg-green-500/10" : "bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-40"
+                )}>
                 {setup.deps === "done" ? "Re-install" : setup.deps === "running" ? "Installing..." : "Install"}
               </button>
             </div>
-
-            {/* camoufox row */}
+            {/* camoufox */}
             <div className="flex items-center gap-3 px-3 py-2 rounded-lg border border-border-subtle bg-surface">
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
                   <span className={cn("w-2 h-2 rounded-full shrink-0", SETUP_CFG[setup.camoufox]?.dot ?? SETUP_CFG.idle.dot)} />
                   <span className="text-xs font-semibold text-text-main">Camoufox Browser</span>
-                  <span className={cn("text-[10px] font-medium", SETUP_CFG[setup.camoufox]?.color ?? SETUP_CFG.idle.color)}>
-                    {SETUP_CFG[setup.camoufox]?.label}
-                  </span>
+                  <span className={cn("text-[10px] font-medium", SETUP_CFG[setup.camoufox]?.color ?? SETUP_CFG.idle.color)}>{SETUP_CFG[setup.camoufox]?.label}</span>
                 </div>
                 <p className="text-[10px] text-text-muted mt-0.5 ml-4">python -m camoufox fetch (~100MB)</p>
               </div>
-              <button
-                onClick={() => runSetupAction("install-camoufox")}
-                disabled={setupBusy || setup.camoufox === "running" || setup.deps !== "done"}
+              <button onClick={() => runSetupAction("install-camoufox")} disabled={setupBusy || setup.camoufox === "running" || setup.deps !== "done"}
                 className={cn("px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer shrink-0",
-                  setup.camoufox === "done"
-                    ? "border border-green-500/30 text-green-600 dark:text-green-400 hover:bg-green-500/10"
-                    : "bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-40"
-                )}
-              >
+                  setup.camoufox === "done" ? "border border-green-500/30 text-green-600 dark:text-green-400 hover:bg-green-500/10" : "bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-40"
+                )}>
                 {setup.camoufox === "done" ? "Re-fetch" : setup.camoufox === "running" ? "Downloading..." : "Download"}
               </button>
             </div>
           </div>
-
-          {/* Python override — collapsed */}
           <details className="group">
             <summary className="text-[10px] text-text-muted cursor-pointer hover:text-text-main list-none flex items-center gap-1">
               <span className="material-symbols-outlined text-[12px] group-open:rotate-90 transition-transform">chevron_right</span>
@@ -359,7 +339,12 @@ export default function ServerManager({ onServerReady, onServerStateChange }) {
               <span className="material-symbols-outlined text-[13px]">delete_sweep</span>Clear
             </button>
           </div>
-          <div className="max-h-60 overflow-y-auto custom-scrollbar font-mono text-[11px] px-4 py-2 bg-black/20 space-y-0.5">
+          {/* onScroll: pause auto-scroll when user scrolls up, resume when near bottom */}
+          <div
+            ref={logContainerRef}
+            onScroll={handleLogScroll}
+            className="max-h-60 overflow-y-auto custom-scrollbar font-mono text-[11px] px-4 py-2 bg-black/20 space-y-0.5"
+          >
             {logs.length === 0
               ? <p className="text-text-muted/50 py-4 text-center">No output yet.</p>
               : logs.map((entry, i) => (
