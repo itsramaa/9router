@@ -1,121 +1,179 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { cn } from "@/shared/utils/cn";
+import ImportAccountsModal from "./ImportAccountsModal";
 
-export default function AccountsPanel({ accounts, onChange, serverUrl }) {
-  const [newEmail, setNewEmail] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+export default function AccountsPanel({ onChange }) {
+  const [accounts, setAccounts]         = useState([]);
+  const [loading, setLoading]           = useState(true);
+  const [newEmail, setNewEmail]         = useState("");
+  const [newPassword, setNewPassword]   = useState("");
+  const [error, setError]               = useState("");
+  const [showImport, setShowImport]     = useState(false);
+  const [deleting, setDeleting]         = useState(null);
 
-  function addAccount() {
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch("/api/automation/accounts");
+      const data = await res.json();
+      if (Array.isArray(data.accounts)) {
+        setAccounts(data.accounts);
+        onChange?.(data.accounts);
+      }
+    } catch { /* ignore */ } finally { setLoading(false); }
+  }, [onChange]);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function addAccount() {
     const email = newEmail.trim();
     const password = newPassword.trim();
-    if (!email || !password) return;
-    if (accounts.some((a) => a.email === email)) {
-      setError("Email already exists.");
-      return;
-    }
-    setError("");
-    onChange([...accounts, { email, password }]);
-    setNewEmail("");
-    setNewPassword("");
-  }
-
-  function removeAccount(email) {
-    onChange(accounts.filter((a) => a.email !== email));
-  }
-
-  async function saveToServer() {
-    setSaving(true);
+    if (!email || !password) { setError("Email and password required."); return; }
+    if (!email.includes("@")) { setError("Invalid email."); return; }
     setError("");
     try {
-      const res = await fetch(`/api/automation/api/save_accounts`, {
+      const res = await fetch("/api/automation/accounts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accounts }),
+        body: JSON.stringify({ email, password }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    } catch (e) {
-      setError(`Save failed: ${e.message}`);
-    } finally {
-      setSaving(false);
-    }
+      if (!res.ok) { const d = await res.json(); setError(d.error || "Failed"); return; }
+      setNewEmail(""); setNewPassword("");
+      await load();
+    } catch (e) { setError(e.message); }
+  }
+
+  async function removeAccount(id) {
+    setDeleting(id);
+    try {
+      await fetch("/api/automation/accounts", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      await load();
+    } finally { setDeleting(null); }
+  }
+
+  async function handleImport(parsed) {
+    const res = await fetch("/api/automation/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accounts: parsed }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    await load();
+    return data;
+  }
+
+  async function clearAll() {
+    if (!confirm(`Delete all ${accounts.length} accounts?`)) return;
+    await fetch("/api/automation/accounts", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ all: true }),
+    });
+    await load();
   }
 
   return (
-    <div className="rounded-[14px] border border-border-subtle bg-surface shadow-[var(--shadow-soft)] overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-border-subtle">
-        <div className="flex items-center gap-2">
-          <span className="material-symbols-outlined text-[18px] text-primary">manage_accounts</span>
-          <h2 className="text-sm font-semibold text-text-main">Accounts</h2>
-          <span className="px-1.5 py-0.5 rounded-full bg-primary/10 text-primary text-[11px] font-semibold">
-            {accounts.length}
-          </span>
-        </div>
-        <button
-          onClick={saveToServer}
-          disabled={saving}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 transition-colors disabled:opacity-50 cursor-pointer"
-        >
-          <span className="material-symbols-outlined text-[14px]">{saving ? "sync" : "cloud_upload"}</span>
-          {saving ? "Saving..." : "Save to Server"}
-        </button>
-      </div>
-
-      {/* Add row */}
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-border-subtle bg-surface-2/50">
-        <input
-          type="email"
-          value={newEmail}
-          onChange={(e) => setNewEmail(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && addAccount()}
-          placeholder="email@gmail.com"
-          className="flex-1 text-xs bg-surface border border-border-subtle rounded-lg px-3 py-2 text-text-main placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-primary/40"
-        />
-        <input
-          type="password"
-          value={newPassword}
-          onChange={(e) => setNewPassword(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && addAccount()}
-          placeholder="password"
-          className="flex-1 text-xs bg-surface border border-border-subtle rounded-lg px-3 py-2 text-text-main placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-primary/40"
-        />
-        <button
-          onClick={addAccount}
-          className="flex items-center gap-1 px-3 py-2 rounded-lg bg-primary/10 text-primary text-xs font-semibold hover:bg-primary/20 transition-colors cursor-pointer shrink-0"
-        >
-          <span className="material-symbols-outlined text-[14px]">add</span>
-          Add
-        </button>
-      </div>
-
-      {error && (
-        <p className="px-4 py-2 text-xs text-red-500">{error}</p>
-      )}
-
-      {/* Account list */}
-      <div className="divide-y divide-border-subtle max-h-64 overflow-y-auto custom-scrollbar">
-        {accounts.length === 0 ? (
-          <p className="px-4 py-6 text-xs text-text-muted text-center">No accounts yet. Add one above.</p>
-        ) : (
-          accounts.map((acc, i) => (
-            <div key={acc.email} className="flex items-center gap-3 px-4 py-2.5 group hover:bg-surface-2 transition-colors">
-              <span className="material-symbols-outlined text-[16px] text-text-muted shrink-0">person</span>
-              <span className="flex-1 text-xs text-text-main font-mono truncate">{acc.email}</span>
-              <span className="text-xs text-text-muted">••••••</span>
+    <>
+      <div className="rounded-[14px] border border-border-subtle bg-surface shadow-[var(--shadow-soft)] overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border-subtle">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[18px] text-primary">manage_accounts</span>
+            <h2 className="text-sm font-semibold text-text-main">Accounts</h2>
+            <span className="px-1.5 py-0.5 rounded-full bg-primary/10 text-primary text-[11px] font-semibold">
+              {accounts.length}
+            </span>
+            <span className="text-[10px] text-text-muted">stored in DB</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setShowImport(true)}
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-border-subtle text-text-muted text-xs font-medium hover:bg-surface-2 hover:text-text-main transition-colors cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[14px]">upload_file</span>
+              Import
+            </button>
+            {accounts.length > 0 && (
               <button
-                onClick={() => removeAccount(acc.email)}
-                className="opacity-0 group-hover:opacity-100 transition-opacity text-text-muted hover:text-red-500 cursor-pointer"
-                aria-label="Remove account"
+                onClick={clearAll}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-red-500/30 text-red-500 text-xs font-medium hover:bg-red-500/10 transition-colors cursor-pointer"
               >
-                <span className="material-symbols-outlined text-[16px]">delete</span>
+                <span className="material-symbols-outlined text-[14px]">delete_sweep</span>
+                Clear all
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Add row */}
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-border-subtle bg-surface-2/50">
+          <input
+            type="email" value={newEmail}
+            onChange={(e) => setNewEmail(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addAccount()}
+            placeholder="email@gmail.com"
+            className="flex-1 text-xs bg-surface border border-border-subtle rounded-lg px-3 py-2 text-text-main placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-primary/40"
+          />
+          <input
+            type="password" value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addAccount()}
+            placeholder="password"
+            className="flex-1 text-xs bg-surface border border-border-subtle rounded-lg px-3 py-2 text-text-main placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-primary/40"
+          />
+          <button
+            onClick={addAccount}
+            className="flex items-center gap-1 px-3 py-2 rounded-lg bg-primary/10 text-primary text-xs font-semibold hover:bg-primary/20 transition-colors cursor-pointer shrink-0"
+          >
+            <span className="material-symbols-outlined text-[14px]">add</span>
+            Add
+          </button>
+        </div>
+
+        {error && <p className="px-4 py-2 text-xs text-red-500">{error}</p>}
+
+        {/* List */}
+        <div className="divide-y divide-border-subtle max-h-64 overflow-y-auto custom-scrollbar">
+          {loading ? (
+            <p className="px-4 py-6 text-xs text-text-muted text-center">Loading...</p>
+          ) : accounts.length === 0 ? (
+            <div className="px-4 py-6 text-center">
+              <p className="text-xs text-text-muted">No accounts yet.</p>
+              <button onClick={() => setShowImport(true)} className="mt-2 text-xs text-primary hover:underline cursor-pointer">
+                Import from file
               </button>
             </div>
-          ))
-        )}
+          ) : (
+            accounts.map((acc) => (
+              <div key={acc.id} className="flex items-center gap-3 px-4 py-2.5 group hover:bg-surface-2 transition-colors">
+                <span className="material-symbols-outlined text-[16px] text-text-muted shrink-0">person</span>
+                <span className="flex-1 text-xs text-text-main font-mono truncate">{acc.email}</span>
+                <span className="text-xs text-text-muted">••••••</span>
+                <button
+                  onClick={() => removeAccount(acc.id)}
+                  disabled={deleting === acc.id}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity text-text-muted hover:text-red-500 cursor-pointer disabled:opacity-50"
+                  aria-label="Remove"
+                >
+                  <span className="material-symbols-outlined text-[16px]">{deleting === acc.id ? "sync" : "delete"}</span>
+                </button>
+              </div>
+            ))
+          )}
+        </div>
       </div>
-    </div>
+
+      {showImport && (
+        <ImportAccountsModal
+          onImport={handleImport}
+          onClose={() => setShowImport(false)}
+        />
+      )}
+    </>
   );
 }

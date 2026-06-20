@@ -1,8 +1,15 @@
+import { getStatus, startServer, stopServer, resolveScriptsDir, resolveDefaultPort } from "@/lib/automation/processManager";
 import os from "os";
-import { getStatus, startServer, stopServer } from "@/lib/automation/processManager";
 
 export async function GET() {
-  return Response.json(getStatus());
+  const status = getStatus();
+  // Also expose env-resolved defaults so ServerManager can pre-fill config
+  return Response.json({
+    ...status,
+    envScriptsDir: resolveScriptsDir(""),
+    envPort: resolveDefaultPort(),
+    platform: os.platform(),
+  });
 }
 
 export async function POST(request) {
@@ -14,11 +21,10 @@ export async function POST(request) {
 
   if (action === "start") {
     try {
-      const defaultPython = os.platform() === "win32" ? "python" : "python3";
-      const result = startServer({
-        pythonPath: pythonPath?.trim() || defaultPython,
-        scriptsDir: scriptsDir?.trim() || "",
-        port: Number(port) || 8765,
+      const result = await startServer({
+        pythonPath: pythonPath?.trim() || undefined,
+        scriptsDir: scriptsDir?.trim() || undefined,
+        port: Number(port) || undefined,
       });
       return Response.json({ ok: true, ...result });
     } catch (e) {

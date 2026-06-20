@@ -9,6 +9,8 @@
 import { spawn } from "child_process";
 import { EventEmitter } from "events";
 import os from "os";
+import fs from "fs";
+import path from "path";
 
 const MAX_LOGS = 300;
 
@@ -17,15 +19,14 @@ const _state = {
   status:    "stopped", // "stopped" | "starting" | "running" | "stopping" | "error"
   pid:       null,
   port:      8765,
+  scriptsDir: "",
   startedAt: null,
   exitCode:  null,
-  logs:      [],        // ring buffer of { ts, line, stream }
+  logs:      [],
   emitter:   new EventEmitter(),
 };
 
 _state.emitter.setMaxListeners(100);
-
-// ── helpers ─────────────────────────────────────────────────────────────────
 
 function pushLog(line, stream = "stdout") {
   const entry = { ts: new Date().toISOString(), line: line.trimEnd(), stream };
@@ -39,16 +40,15 @@ function setStatus(status) {
   _state.emitter.emit("status", status);
 }
 
-// ── public API ───────────────────────────────────────────────────────────────
-
 export function getStatus() {
   return {
-    status:    _state.status,
-    pid:       _state.pid,
-    port:      _state.port,
-    startedAt: _state.startedAt,
-    exitCode:  _state.exitCode,
-    uptime:    _state.startedAt ? Date.now() - _state.startedAt : null,
+    status:     _state.status,
+    pid:        _state.pid,
+    port:       _state.port,
+    scriptsDir: _state.scriptsDir,
+    startedAt:  _state.startedAt,
+    exitCode:   _state.exitCode,
+    uptime:     _state.startedAt ? Date.now() - _state.startedAt : null,
   };
 }
 
@@ -56,46 +56,73 @@ export function getLogs() {
   return [..._state.logs];
 }
 
-/** Subscribe to live log entries. Returns unsubscribe fn. */
 export function subscribeLog(listener) {
   _state.emitter.on("log", listener);
   return () => _state.emitter.off("log", listener);
 }
 
-/** Subscribe to status changes. Returns unsubscribe fn. */
 export function subscribeStatus(listener) {
   _state.emitter.on("status", listener);
   return () => _state.emitter.off("status", listener);
 }
 
+export function resolveScriptsDir(override) {
+  return override?.trim() || process.env.AUTOMATION_SCRIPTS_DIR?.trim() || "";
+}
+
+export function resolveDefaultPort() {
+  const p = parseInt(process.env.AUTOMATION_SERVER_PORT || "", 10);
+  return isNaN(p) ? 8765 : p;
+}
+
 /**
  * Spawn the Python server process.
- * @param {{ pythonPath?: string, scriptsDir: string, port?: number }} opts
+ * Syncs accounts from 9router DB → accounts.json before spawning.
  */
-export function startServer({ pythonPath, scriptsDir, port = 8765 }) {
+export async function startServer({ pythonPath, scriptsDir, port } = {}) {
   if (_state.proc) {
     throw new Error("Server is already running (pid " + _state.pid + ")");
   }
-  if (!scriptsDir) {
-    throw new Error("scriptsDir is required — set the path to your bulk-accounts folder");
+
+  const resolvedDir  = resolveScriptsDir(scriptsDir);
+  const resolvedPort = port || resolveDefaultPort();
+  const python       = pythonPath?.trim() || (os.platform() === "win32" ? "python" : "python3");
+
+  if (!resolvedDir) {
+    throw new Error("scriptsDir is required — set AUTOMATION_SCRIPTS_DIR env var or pass it explicitly");
   }
 
-  const python = pythonPath || (os.platform() === "win32" ? "python" : "python3");
+  // Sync accounts from 9router DB → accounts.json before spawning
+  try {
+    const { getAutomationAccountsForSync } = await import("../db/repos/automationAccountsRepo.js");
+    const accounts = await getAutomationAccountsForSync();
+    if (accounts.length > 0) {
+      const accountsPath = path.join(resolvedDir, "accounts.json");
+      const tmp = accountsPath + ".tmp";
+      fs.writeFileSync(tmp, JSON.stringify(accounts, null, 2), "utf-8");
+      fs.renameSync(tmp, accountsPath);
+      pushLog(`[manager] Synced ${accounts.length} account(s) → accounts.json`, "system");
+    } else {
+      pushLog("[manager] No accounts in DB — skipping accounts.json sync", "system");
+    }
+  } catch (e) {
+    pushLog(`[manager] Account sync warning: ${e.message}`, "system");
+  }
 
-  _state.port      = port;
-  _state.exitCode  = null;
-  _state.startedAt = null;
-  _state.logs      = [];
+  _state.port       = resolvedPort;
+  _state.scriptsDir = resolvedDir;
+  _state.exitCode   = null;
+  _state.startedAt  = null;
+  _state.logs       = [];
   setStatus("starting");
 
-  pushLog(`[manager] Spawning: ${python} server.py --port ${port}`, "system");
-  pushLog(`[manager] Working dir: ${scriptsDir}`, "system");
+  pushLog(`[manager] Spawning: ${python} server.py --port ${resolvedPort}`, "system");
+  pushLog(`[manager] Working dir: ${resolvedDir}`, "system");
 
-  const proc = spawn(python, ["server.py", "--port", String(port)], {
-    cwd: scriptsDir,
+  const proc = spawn(python, ["server.py", "--port", String(resolvedPort)], {
+    cwd: resolvedDir,
     stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env },
-    // On Windows, don't open a console window
     windowsHide: true,
   });
 
@@ -108,7 +135,6 @@ export function startServer({ pythonPath, scriptsDir, port = 8765 }) {
     for (const line of chunk.toString().split("\n")) {
       if (!line.trim()) continue;
       pushLog(line, "stdout");
-      // Detect ready signal from server.py stdout
       if (
         line.includes("[server] Dashboard") ||
         line.includes("[server] WebSocket") ||
@@ -147,7 +173,6 @@ export function startServer({ pythonPath, scriptsDir, port = 8765 }) {
   return { pid: proc.pid };
 }
 
-/** Send SIGTERM then SIGKILL after 5 s. */
 export function stopServer() {
   if (!_state.proc) return false;
   setStatus("stopping");
@@ -162,7 +187,6 @@ export function stopServer() {
   return true;
 }
 
-// Kill child on Node.js exit so we don't leave orphan Python processes
 process.on("exit", () => {
   if (_state.proc) {
     try { _state.proc.kill("SIGKILL"); } catch { /* ignore */ }

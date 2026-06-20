@@ -19,16 +19,13 @@ const LOG_COLORS = {
 
 const LS_KEY = "automation_server_cfg";
 
-function loadConfig() {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch { /* ignore */ }
-  return { pythonPath: "", scriptsDir: "", port: "8765" };
+function loadCfg() {
+  try { const r = localStorage.getItem(LS_KEY); if (r) return JSON.parse(r); } catch {}
+  return { pythonPath: "", scriptsDir: "", port: "" };
 }
 
-function saveConfig(cfg) {
-  try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)); } catch { /* ignore */ }
+function saveCfg(c) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(c)); } catch {}
 }
 
 function formatUptime(ms) {
@@ -42,24 +39,23 @@ function formatUptime(ms) {
 }
 
 export default function ServerManager({ onServerReady }) {
-  const [cfg, setCfg]           = useState({ pythonPath: "", scriptsDir: "", port: "8765" });
-  const [status, setStatus]     = useState("stopped");
-  const [pid, setPid]           = useState(null);
-  const [uptime, setUptime]     = useState(null);
+  const [cfg, setCfg]             = useState({ pythonPath: "", scriptsDir: "", port: "" });
+  const [envDefaults, setEnvDefaults] = useState({ scriptsDir: "", port: 8765 });
+  const [status, setStatus]       = useState("stopped");
+  const [pid, setPid]             = useState(null);
+  const [uptime, setUptime]       = useState(null);
   const [startedAt, setStartedAt] = useState(null);
-  const [error, setError]       = useState("");
-  const [logs, setLogs]         = useState([]);
-  const [logsOpen, setLogsOpen] = useState(false);
-  const [cfgOpen, setCfgOpen]   = useState(false);
-  const [busy, setBusy]         = useState(false);
-  const logBottomRef            = useRef(null);
-  const esRef                   = useRef(null);
-  const pollRef                 = useRef(null);
+  const [error, setError]         = useState("");
+  const [logs, setLogs]           = useState([]);
+  const [logsOpen, setLogsOpen]   = useState(false);
+  const [cfgOpen, setCfgOpen]     = useState(false);
+  const [busy, setBusy]           = useState(false);
+  const logBottomRef              = useRef(null);
+  const esRef                     = useRef(null);
+  const pollRef                   = useRef(null);
 
-  // Load config from localStorage once on mount
-  useEffect(() => {
-    setCfg(loadConfig());
-  }, []);
+  // Load localStorage config on mount
+  useEffect(() => { setCfg(loadCfg()); }, []);
 
   // Uptime ticker
   useEffect(() => {
@@ -75,7 +71,6 @@ export default function ServerManager({ onServerReady }) {
     if (logsOpen) logBottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs, logsOpen]);
 
-  // SSE log stream
   const connectLogStream = useCallback(() => {
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
     const es = new EventSource("/api/automation/server/logs");
@@ -83,19 +78,12 @@ export default function ServerManager({ onServerReady }) {
     es.onmessage = (e) => {
       try {
         const entry = JSON.parse(e.data);
-        setLogs((prev) => {
-          const next = [...prev, entry];
-          return next.length > 300 ? next.slice(next.length - 300) : next;
-        });
-      } catch { /* ignore */ }
+        setLogs((prev) => { const n = [...prev, entry]; return n.length > 300 ? n.slice(-300) : n; });
+      } catch {}
     };
-    es.onerror = () => {
-      es.close();
-      esRef.current = null;
-    };
+    es.onerror = () => { es.close(); esRef.current = null; };
   }, []);
 
-  // Poll server status
   const pollStatus = useCallback(async () => {
     try {
       const res = await fetch("/api/automation/server");
@@ -104,27 +92,32 @@ export default function ServerManager({ onServerReady }) {
       setStatus(data.status);
       setPid(data.pid);
       setStartedAt(data.startedAt);
-      if (data.status === "running" && onServerReady) {
-        onServerReady(data.port);
+      // Pick up env defaults (scriptsDir from AUTOMATION_SCRIPTS_DIR env var)
+      if (data.envScriptsDir || data.envPort) {
+        setEnvDefaults({ scriptsDir: data.envScriptsDir || "", port: data.envPort || 8765 });
       }
-    } catch { /* ignore */ }
+      if (data.status === "running" && onServerReady) {
+        onServerReady(data.port || data.envPort || 8765);
+      }
+    } catch {}
   }, [onServerReady]);
 
   useEffect(() => {
     pollStatus();
     connectLogStream();
     pollRef.current = setInterval(pollStatus, 2000);
-    return () => {
-      clearInterval(pollRef.current);
-      esRef.current?.close();
-    };
+    return () => { clearInterval(pollRef.current); esRef.current?.close(); };
   }, [pollStatus, connectLogStream]);
 
   function handleCfgChange(key, val) {
     const next = { ...cfg, [key]: val };
     setCfg(next);
-    saveConfig(next);
+    saveCfg(next);
   }
+
+  // Effective values: user override → env default → hardcoded fallback
+  const effectiveScriptsDir = cfg.scriptsDir || envDefaults.scriptsDir;
+  const effectivePort       = cfg.port       || String(envDefaults.port || 8765);
 
   async function handleStart() {
     setError("");
@@ -137,18 +130,15 @@ export default function ServerManager({ onServerReady }) {
         body: JSON.stringify({
           action: "start",
           pythonPath: cfg.pythonPath || undefined,
-          scriptsDir: cfg.scriptsDir,
-          port: Number(cfg.port) || 8765,
+          scriptsDir: effectiveScriptsDir || undefined,
+          port: Number(effectivePort) || undefined,
         }),
       });
       const data = await res.json();
       if (!data.ok) { setError(data.error || "Failed to start"); }
       else { connectLogStream(); setLogsOpen(true); }
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
   }
 
   async function handleStop() {
@@ -159,97 +149,68 @@ export default function ServerManager({ onServerReady }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "stop" }),
       });
-    } finally {
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
   }
 
-  const st = STATUS_CFG[status] ?? STATUS_CFG.stopped;
-  const isRunning  = status === "running";
-  const isBusy     = status === "starting" || status === "stopping" || busy;
-  const canStart   = !isBusy && (status === "stopped" || status === "error");
-  const canStop    = !busy && (isRunning || status === "starting");
+  const st       = STATUS_CFG[status] ?? STATUS_CFG.stopped;
+  const isRunning = status === "running";
+  const isBusy    = status === "starting" || status === "stopping" || busy;
+  const canStart  = !isBusy && (status === "stopped" || status === "error");
+  const canStop   = !busy  && (isRunning || status === "starting");
+  const hasEnvDir = Boolean(envDefaults.scriptsDir);
 
   return (
     <div className={cn("rounded-[14px] border bg-surface shadow-[var(--shadow-soft)] overflow-hidden transition-colors", st.border)}>
-      {/* Header row */}
+      {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3">
-        <div className={cn("flex items-center justify-center size-8 rounded-lg shrink-0",
-          isRunning ? "bg-green-500/10" : "bg-surface-2"
-        )}>
-          <span className={cn("material-symbols-outlined text-[18px]",
-            isRunning ? "text-green-500" : "text-text-muted"
-          )}>terminal</span>
+        <div className={cn("flex items-center justify-center size-8 rounded-lg shrink-0", isRunning ? "bg-green-500/10" : "bg-surface-2")}>
+          <span className={cn("material-symbols-outlined text-[18px]", isRunning ? "text-green-500" : "text-text-muted")}>terminal</span>
         </div>
-
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold text-text-main">bulk-accounts Server</span>
             <div className="flex items-center gap-1.5">
               <span className={cn("w-2 h-2 rounded-full shrink-0", st.dot)} />
               <span className={cn("text-xs font-semibold", st.color)}>{st.label}</span>
             </div>
-            {isRunning && pid && (
-              <span className="text-[10px] text-text-muted font-mono">pid:{pid}</span>
-            )}
-            {isRunning && uptime != null && (
-              <span className="text-[10px] text-green-600/80 dark:text-green-400/70">↑ {formatUptime(uptime)}</span>
-            )}
+            {isRunning && pid && <span className="text-[10px] text-text-muted font-mono">pid:{pid}</span>}
+            {isRunning && uptime != null && <span className="text-[10px] text-green-600/80 dark:text-green-400/70">↑ {formatUptime(uptime)}</span>}
           </div>
           <p className="text-[11px] text-text-muted truncate">
             {isRunning
-              ? `Listening on :${cfg.port} — WS auto-connected`
+              ? `Port :${effectivePort} · WS auto-connected · Keys auto-injected to DB`
+              : hasEnvDir
+              ? `Dir: ${envDefaults.scriptsDir}`
               : "Python server for bulk-accounts harvester"}
           </p>
         </div>
 
-        {/* Action buttons */}
         <div className="flex items-center gap-2 shrink-0">
-          {/* Config toggle */}
           <button
             onClick={() => setCfgOpen((v) => !v)}
-            className={cn(
-              "flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer",
-              cfgOpen
-                ? "border-primary/30 bg-primary/10 text-primary"
-                : "border-border-subtle text-text-muted hover:bg-surface-2 hover:text-text-main"
+            className={cn("flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer",
+              cfgOpen ? "border-primary/30 bg-primary/10 text-primary" : "border-border-subtle text-text-muted hover:bg-surface-2 hover:text-text-main"
             )}
           >
             <span className="material-symbols-outlined text-[14px]">settings</span>
             Config
           </button>
-
-          {/* Log toggle */}
           <button
             onClick={() => setLogsOpen((v) => !v)}
-            className={cn(
-              "flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer",
-              logsOpen
-                ? "border-primary/30 bg-primary/10 text-primary"
-                : "border-border-subtle text-text-muted hover:bg-surface-2 hover:text-text-main"
+            className={cn("flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer",
+              logsOpen ? "border-primary/30 bg-primary/10 text-primary" : "border-border-subtle text-text-muted hover:bg-surface-2 hover:text-text-main"
             )}
           >
             <span className="material-symbols-outlined text-[14px]">article</span>
             Logs
-            {logs.length > 0 && (
-              <span className="px-1 rounded-full bg-surface-2 text-text-muted text-[10px] font-mono">{logs.length}</span>
-            )}
+            {logs.length > 0 && <span className="px-1 rounded-full bg-surface-2 text-text-muted text-[10px] font-mono">{logs.length}</span>}
           </button>
-
-          {/* Stop */}
-          <button
-            onClick={handleStop}
-            disabled={!canStop}
+          <button onClick={handleStop} disabled={!canStop}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-500/30 text-red-500 text-xs font-semibold hover:bg-red-500/10 transition-colors disabled:opacity-30 cursor-pointer"
           >
-            <span className="material-symbols-outlined text-[14px]">stop</span>
-            Stop
+            <span className="material-symbols-outlined text-[14px]">stop</span>Stop
           </button>
-
-          {/* Start */}
-          <button
-            onClick={handleStart}
-            disabled={!canStart}
+          <button onClick={handleStart} disabled={!canStart}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 transition-colors disabled:opacity-30 cursor-pointer shadow-[var(--shadow-warm)]"
           >
             <span className={cn("material-symbols-outlined text-[14px]", isBusy ? "animate-spin" : "")}>
@@ -263,8 +224,8 @@ export default function ServerManager({ onServerReady }) {
       {error && (
         <div className="mx-4 mb-3 px-3 py-2 rounded-lg border border-red-500/30 bg-red-500/5 flex items-start gap-2">
           <span className="material-symbols-outlined text-[14px] text-red-500 shrink-0 mt-px">error</span>
-          <p className="text-xs text-red-500">{error}</p>
-          <button onClick={() => setError("")} className="ml-auto text-red-400 hover:text-red-500 cursor-pointer shrink-0">
+          <p className="text-xs text-red-500 flex-1">{error}</p>
+          <button onClick={() => setError("")} className="text-red-400 hover:text-red-500 cursor-pointer shrink-0">
             <span className="material-symbols-outlined text-[14px]">close</span>
           </button>
         </div>
@@ -277,36 +238,34 @@ export default function ServerManager({ onServerReady }) {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
               <label className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block mb-1">Python Executable</label>
-              <input
-                type="text"
-                value={cfg.pythonPath}
-                onChange={(e) => handleCfgChange("pythonPath", e.target.value)}
+              <input type="text" value={cfg.pythonPath} onChange={(e) => handleCfgChange("pythonPath", e.target.value)}
                 placeholder="python  (or python3)"
                 className="w-full text-xs font-mono bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-text-main placeholder:text-text-muted/50 focus:outline-none focus:ring-1 focus:ring-primary/40"
               />
             </div>
-            <div className="sm:col-span-1">
+            <div>
               <label className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block mb-1">Port</label>
-              <input
-                type="number"
-                value={cfg.port}
-                onChange={(e) => handleCfgChange("port", e.target.value)}
+              <input type="number" value={cfg.port} onChange={(e) => handleCfgChange("port", e.target.value)}
+                placeholder={String(envDefaults.port || 8765)}
                 className="w-full text-xs font-mono bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-text-main focus:outline-none focus:ring-1 focus:ring-primary/40"
               />
             </div>
-            <div className="sm:col-span-1" />
+            <div />
             <div className="sm:col-span-3">
               <label className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block mb-1">
-                bulk-accounts Directory <span className="text-red-400">*</span>
+                bulk-accounts Directory
+                {hasEnvDir && <span className="ml-1 text-green-500">(auto from env)</span>}
+                {!hasEnvDir && <span className="text-red-400 ml-1">*</span>}
               </label>
-              <input
-                type="text"
-                value={cfg.scriptsDir}
-                onChange={(e) => handleCfgChange("scriptsDir", e.target.value)}
-                placeholder="e.g. C:\Users\you\bulk-accounts  or  /home/you/bulk-accounts"
+              <input type="text" value={cfg.scriptsDir} onChange={(e) => handleCfgChange("scriptsDir", e.target.value)}
+                placeholder={envDefaults.scriptsDir || "e.g. C:\\Users\\you\\bulk-accounts"}
                 className="w-full text-xs font-mono bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-text-main placeholder:text-text-muted/50 focus:outline-none focus:ring-1 focus:ring-primary/40"
               />
-              <p className="mt-1 text-[10px] text-text-muted">Absolute path to the folder containing server.py</p>
+              <p className="mt-1 text-[10px] text-text-muted">
+                {hasEnvDir
+                  ? `Using AUTOMATION_SCRIPTS_DIR="${envDefaults.scriptsDir}" — override above if needed`
+                  : "Set AUTOMATION_SCRIPTS_DIR env var or enter path manually"}
+              </p>
             </div>
           </div>
         </div>
@@ -318,23 +277,20 @@ export default function ServerManager({ onServerReady }) {
           <div className="flex items-center justify-between px-4 py-2 bg-surface-2/30">
             <span className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">Process Output</span>
             <button onClick={() => setLogs([])} className="text-[11px] text-text-muted hover:text-text-main cursor-pointer flex items-center gap-1">
-              <span className="material-symbols-outlined text-[13px]">delete_sweep</span>
-              Clear
+              <span className="material-symbols-outlined text-[13px]">delete_sweep</span>Clear
             </button>
           </div>
           <div className="max-h-60 overflow-y-auto custom-scrollbar font-mono text-[11px] px-4 py-2 bg-black/20 space-y-0.5">
-            {logs.length === 0 ? (
-              <p className="text-text-muted/50 py-4 text-center">No output yet. Start the server to see logs.</p>
-            ) : (
-              logs.map((entry, i) => (
+            {logs.length === 0
+              ? <p className="text-text-muted/50 py-4 text-center">No output yet.</p>
+              : logs.map((entry, i) => (
                 <div key={i} className={cn("flex gap-2 leading-relaxed", LOG_COLORS[entry.stream] ?? LOG_COLORS.stdout)}>
                   <span className="text-text-muted/40 shrink-0 select-none">
                     {new Date(entry.ts).toLocaleTimeString("en-US", { hour12: false })}
                   </span>
                   <span className="break-all whitespace-pre-wrap">{entry.line}</span>
                 </div>
-              ))
-            )}
+              ))}
             <div ref={logBottomRef} />
           </div>
         </div>
