@@ -27,7 +27,7 @@ const LOG_COLORS = {
 const LS_KEY = "automation_server_cfg";
 function loadCfg() {
   try { const r = localStorage.getItem(LS_KEY); if (r) return JSON.parse(r); } catch {}
-  return { pythonPath: "", scriptsDir: "", port: "" };
+  return { pythonPath: "", port: "" };
 }
 function saveCfg(c) { try { localStorage.setItem(LS_KEY, JSON.stringify(c)); } catch {} }
 
@@ -39,9 +39,9 @@ function formatUptime(ms) {
   return `${s}s`;
 }
 
-export default function ServerManager({ onServerReady }) {
-  const [cfg, setCfg]               = useState({ pythonPath: "", scriptsDir: "", port: "" });
-  const [envDefaults, setEnvDefaults] = useState({ scriptsDir: "", port: 8765 });
+export default function ServerManager({ onServerReady, onServerStateChange }) {
+  const [cfg, setCfg]               = useState({ pythonPath: "", port: "" });
+  const [envPort, setEnvPort]       = useState(8765);
   const [status, setStatus]         = useState("stopped");
   const [pid, setPid]               = useState(null);
   const [uptime, setUptime]         = useState(null);
@@ -51,12 +51,12 @@ export default function ServerManager({ onServerReady }) {
   const [error, setError]           = useState("");
   const [logs, setLogs]             = useState([]);
   const [logsOpen, setLogsOpen]     = useState(false);
-  const [cfgOpen, setCfgOpen]       = useState(false);
   const [setupOpen, setSetupOpen]   = useState(false);
   const [busy, setBusy]             = useState(false);
   const logBottomRef                = useRef(null);
   const esRef                       = useRef(null);
   const pollRef                     = useRef(null);
+  const prevStatus                  = useRef("stopped");
 
   useEffect(() => { setCfg(loadCfg()); }, []);
 
@@ -94,19 +94,22 @@ export default function ServerManager({ onServerReady }) {
       setPid(data.pid);
       setStartedAt(data.startedAt);
       if (data.setup) setSetup(data.setup);
-      if (data.envScriptsDir || data.envPort) {
-        setEnvDefaults({ scriptsDir: data.envScriptsDir || "", port: data.envPort || 8765 });
-      }
-      if (data.status === "running" && onServerReady) {
-        onServerReady(data.port || data.envPort || 8765);
+      if (data.envPort) setEnvPort(data.envPort);
+
+      // Notify parent of state changes
+      if (data.status !== prevStatus.current) {
+        prevStatus.current = data.status;
+        onServerStateChange?.(data.status);
+        if (data.status === "running" && onServerReady) {
+          onServerReady(data.port || data.envPort || 8765);
+        }
       }
     } catch {}
-  }, [onServerReady]);
+  }, [onServerReady, onServerStateChange]);
 
   useEffect(() => {
     pollStatus();
     connectLogStream();
-    // Auto-check setup status on mount
     fetch("/api/automation/setup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -129,20 +132,22 @@ export default function ServerManager({ onServerReady }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, pythonPath: cfg.pythonPath || undefined }),
       });
-      // Poll until done (setup state updates come via pollStatus every 2s)
     } catch (e) { setError(e.message); }
     finally { setSetupBusy(false); }
   }
 
-  const effectiveScriptsDir = cfg.scriptsDir || envDefaults.scriptsDir;
-  const effectivePort       = cfg.port || String(envDefaults.port || 8765);
+  const effectivePort = cfg.port || String(envPort || 8765);
 
   async function handleStart() {
     setError(""); setBusy(true); setLogs([]);
     try {
       const res = await fetch("/api/automation/server", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "start", pythonPath: cfg.pythonPath || undefined, scriptsDir: effectiveScriptsDir || undefined, port: Number(effectivePort) || undefined }),
+        body: JSON.stringify({
+          action: "start",
+          pythonPath: cfg.pythonPath || undefined,
+          port: Number(effectivePort) || undefined,
+        }),
       });
       const data = await res.json();
       if (!data.ok) setError(data.error || "Failed to start");
@@ -153,16 +158,19 @@ export default function ServerManager({ onServerReady }) {
 
   async function handleStop() {
     setBusy(true);
-    try { await fetch("/api/automation/server", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "stop" }) }); }
-    finally { setBusy(false); }
+    try {
+      await fetch("/api/automation/server", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop" }),
+      });
+    } finally { setBusy(false); }
   }
 
-  const st        = STATUS_CFG[status] ?? STATUS_CFG.stopped;
+  const st         = STATUS_CFG[status] ?? STATUS_CFG.stopped;
   const isRunning  = status === "running";
   const isBusy     = status === "starting" || status === "stopping" || busy;
   const canStart   = !isBusy && (status === "stopped" || status === "error");
   const canStop    = !busy && (isRunning || status === "starting");
-  const hasEnvDir  = Boolean(envDefaults.scriptsDir);
   const needsSetup = setup.deps !== "done" || setup.camoufox !== "done";
 
   return (
@@ -182,42 +190,63 @@ export default function ServerManager({ onServerReady }) {
             {isRunning && pid && <span className="text-[10px] text-text-muted font-mono">pid:{pid}</span>}
             {isRunning && uptime != null && <span className="text-[10px] text-green-600/80 dark:text-green-400/70">↑ {formatUptime(uptime)}</span>}
             {needsSetup && !isRunning && (
-              <span className="text-[10px] text-amber-500 flex items-center gap-0.5">
+              <button
+                onClick={() => setSetupOpen(true)}
+                className="text-[10px] text-amber-500 flex items-center gap-0.5 hover:underline cursor-pointer"
+              >
                 <span className="material-symbols-outlined text-[11px]">warning</span>
                 Setup required
-              </span>
+              </button>
             )}
           </div>
           <p className="text-[11px] text-text-muted truncate">
-            {isRunning ? `Port :${effectivePort} · WS auto-connected · Keys auto-injected to DB`
-              : "Python harvester server — bundled at ./bulk-accounts/"}
+            {isRunning
+              ? `Port :${effectivePort} · WS connected · Keys auto-injected to DB`
+              : "Python harvester — bundled at ./bulk-accounts/"}
           </p>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
-          <button onClick={() => setSetupOpen(v => !v)} className={cn("flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer",
-            setupOpen ? "border-primary/30 bg-primary/10 text-primary" : needsSetup ? "border-amber-400/40 text-amber-600 dark:text-amber-400 hover:bg-amber-400/10" : "border-border-subtle text-text-muted hover:bg-surface-2 hover:text-text-main"
-          )}>
-            <span className="material-symbols-outlined text-[14px]">build</span>
-            Setup
-          </button>
-          <button onClick={() => setCfgOpen(v => !v)} className={cn("flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer",
-            cfgOpen ? "border-primary/30 bg-primary/10 text-primary" : "border-border-subtle text-text-muted hover:bg-surface-2 hover:text-text-main"
-          )}>
-            <span className="material-symbols-outlined text-[14px]">settings</span>Config
-          </button>
-          <button onClick={() => setLogsOpen(v => !v)} className={cn("flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer",
-            logsOpen ? "border-primary/30 bg-primary/10 text-primary" : "border-border-subtle text-text-muted hover:bg-surface-2 hover:text-text-main"
-          )}>
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Setup button — only show when not fully installed or explicitly opened */}
+          {(needsSetup || setupOpen) && (
+            <button
+              onClick={() => setSetupOpen(v => !v)}
+              className={cn("flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer",
+                setupOpen
+                  ? "border-primary/30 bg-primary/10 text-primary"
+                  : "border-amber-400/40 text-amber-600 dark:text-amber-400 hover:bg-amber-400/10"
+              )}
+            >
+              <span className="material-symbols-outlined text-[14px]">build</span>
+              Setup
+            </button>
+          )}
+
+          <button
+            onClick={() => setLogsOpen(v => !v)}
+            className={cn("flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer",
+              logsOpen ? "border-primary/30 bg-primary/10 text-primary" : "border-border-subtle text-text-muted hover:bg-surface-2 hover:text-text-main"
+            )}
+          >
             <span className="material-symbols-outlined text-[14px]">article</span>
             Logs
             {logs.length > 0 && <span className="px-1 rounded-full bg-surface-2 text-text-muted text-[10px] font-mono">{logs.length}</span>}
           </button>
-          <button onClick={handleStop} disabled={!canStop} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-500/30 text-red-500 text-xs font-semibold hover:bg-red-500/10 transition-colors disabled:opacity-30 cursor-pointer">
-            <span className="material-symbols-outlined text-[14px]">stop</span>Stop
-          </button>
-          <button onClick={handleStart} disabled={!canStart} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 transition-colors disabled:opacity-30 cursor-pointer shadow-[var(--shadow-warm)]">
-            <span className={cn("material-symbols-outlined text-[14px]", isBusy ? "animate-spin" : "")}>{isBusy ? "sync" : "play_arrow"}</span>
+
+          {canStop && (
+            <button onClick={handleStop} disabled={!canStop}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-500/30 text-red-500 text-xs font-semibold hover:bg-red-500/10 transition-colors disabled:opacity-30 cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[14px]">stop</span>Stop
+            </button>
+          )}
+
+          <button onClick={handleStart} disabled={!canStart}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 transition-colors disabled:opacity-30 cursor-pointer shadow-[var(--shadow-warm)]"
+          >
+            <span className={cn("material-symbols-outlined text-[14px]", isBusy ? "animate-spin" : "")}>
+              {isBusy ? "sync" : "play_arrow"}
+            </span>
             {status === "starting" ? "Starting..." : status === "stopping" ? "Stopping..." : "Start"}
           </button>
         </div>
@@ -246,19 +275,18 @@ export default function ServerManager({ onServerReady }) {
               <span className={cn("material-symbols-outlined text-[14px]", setupBusy ? "animate-spin" : "")}>
                 {setupBusy ? "sync" : "download"}
               </span>
-              {setup.deps === "done" && setup.camoufox === "done" ? "All Installed" : "Install All"}
+              {setup.deps === "done" && setup.camoufox === "done" ? "All Installed ✓" : "Install All"}
             </button>
           </div>
 
           <div className="space-y-2">
-            {/* Python deps */}
             <div className="flex items-center gap-3 px-3 py-2 rounded-lg border border-border-subtle bg-surface">
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
                   <span className={cn("w-2 h-2 rounded-full shrink-0", SETUP_CFG[setup.deps]?.dot ?? SETUP_CFG.idle.dot)} />
                   <span className="text-xs font-semibold text-text-main">Python Dependencies</span>
                   <span className={cn("text-[10px] font-medium", SETUP_CFG[setup.deps]?.color ?? SETUP_CFG.idle.color)}>
-                    {SETUP_CFG[setup.deps]?.label ?? "Unknown"}
+                    {SETUP_CFG[setup.deps]?.label}
                   </span>
                 </div>
                 <p className="text-[10px] text-text-muted mt-0.5 ml-4">pip install -r requirements-harvest.txt</p>
@@ -276,17 +304,16 @@ export default function ServerManager({ onServerReady }) {
               </button>
             </div>
 
-            {/* Camoufox */}
             <div className="flex items-center gap-3 px-3 py-2 rounded-lg border border-border-subtle bg-surface">
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
                   <span className={cn("w-2 h-2 rounded-full shrink-0", SETUP_CFG[setup.camoufox]?.dot ?? SETUP_CFG.idle.dot)} />
                   <span className="text-xs font-semibold text-text-main">Camoufox Browser</span>
                   <span className={cn("text-[10px] font-medium", SETUP_CFG[setup.camoufox]?.color ?? SETUP_CFG.idle.color)}>
-                    {SETUP_CFG[setup.camoufox]?.label ?? "Unknown"}
+                    {SETUP_CFG[setup.camoufox]?.label}
                   </span>
                 </div>
-                <p className="text-[10px] text-text-muted mt-0.5 ml-4">python -m camoufox fetch (~100MB download)</p>
+                <p className="text-[10px] text-text-muted mt-0.5 ml-4">python -m camoufox fetch (~100MB)</p>
               </div>
               <button
                 onClick={() => runSetupAction("install-camoufox")}
@@ -302,47 +329,21 @@ export default function ServerManager({ onServerReady }) {
             </div>
           </div>
 
-          {setup.deps !== "done" && (
-            <p className="text-[10px] text-text-muted flex items-center gap-1">
-              <span className="material-symbols-outlined text-[12px]">info</span>
-              Install dependencies first, then download Camoufox. Output shown in Logs panel.
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* Config panel */}
-      {cfgOpen && (
-        <div className="border-t border-border-subtle bg-surface-2/30 px-4 py-3 space-y-3">
-          <p className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">Server Configuration</p>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div>
-              <label className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block mb-1">Python Executable</label>
-              <input type="text" value={cfg.pythonPath} onChange={(e) => handleCfgChange("pythonPath", e.target.value)}
-                placeholder="python  (or python3)"
+          {/* Python path override — only when needed, collapsed by default */}
+          <details className="group">
+            <summary className="text-[10px] text-text-muted cursor-pointer hover:text-text-main list-none flex items-center gap-1">
+              <span className="material-symbols-outlined text-[12px] group-open:rotate-90 transition-transform">chevron_right</span>
+              Advanced — Python executable override
+            </summary>
+            <div className="mt-2 pl-4">
+              <input
+                type="text" value={cfg.pythonPath}
+                onChange={(e) => handleCfgChange("pythonPath", e.target.value)}
+                placeholder="python  (default, auto-detected)"
                 className="w-full text-xs font-mono bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-text-main placeholder:text-text-muted/50 focus:outline-none focus:ring-1 focus:ring-primary/40"
               />
             </div>
-            <div>
-              <label className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block mb-1">Port</label>
-              <input type="number" value={cfg.port} onChange={(e) => handleCfgChange("port", e.target.value)}
-                placeholder={String(envDefaults.port || 8765)}
-                className="w-full text-xs font-mono bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-text-main focus:outline-none focus:ring-1 focus:ring-primary/40"
-              />
-            </div>
-            <div />
-            <div className="sm:col-span-3">
-              <label className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block mb-1">
-                bulk-accounts Directory
-                <span className="ml-1 text-green-500">(bundled at ./bulk-accounts/)</span>
-              </label>
-              <input type="text" value={cfg.scriptsDir} onChange={(e) => handleCfgChange("scriptsDir", e.target.value)}
-                placeholder={envDefaults.scriptsDir || "./bulk-accounts  (auto-detected)"}
-                className="w-full text-xs font-mono bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-text-main placeholder:text-text-muted/50 focus:outline-none focus:ring-1 focus:ring-primary/40"
-              />
-              <p className="mt-1 text-[10px] text-text-muted">Leave blank to use bundled ./bulk-accounts/ directory</p>
-            </div>
-          </div>
+          </details>
         </div>
       )}
 
