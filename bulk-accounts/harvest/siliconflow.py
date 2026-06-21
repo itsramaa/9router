@@ -8,7 +8,7 @@ from typing import Any
 from core.selectors import SELECTORS
 from .base import emit_progress, emit_error
 from harvest.base import handle_oauth_popup
-from .dashboard import validate_and_save_to_dashboard
+from .dashboard import validate_and_save_to_dashboard, email_in_connection_list
 from .utils import (
     click_first_visible,
     fill_first_visible,
@@ -43,7 +43,7 @@ async def harvest(page: Any, email: str, password: str, provider: str = "silicon
 
         key = await get_text_first_visible(page, _S["EXTRACT_SPAN"])
         if key:
-            await validate_and_save_to_dashboard(page, key, provider, email)
+            await validate_and_save_to_dashboard(key, provider, email)
         return key
     except Exception as e:
         emit_error(provider, e); return ""

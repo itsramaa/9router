@@ -31,32 +31,76 @@ def emit_error(provider: str, error: Any) -> None:
     Emit.error(provider, error)
 
 async def interact_mode(slot: int, page: Any, reason: str, _emit_override=None) -> str:
-    from core.interact import InteractMode
+    from core.interact import interact_gate
     if slot == 0:
         slot = _current_slot.get()
-    return await InteractMode.enter(slot, page, reason)
+    return await interact_gate(slot, page, reason)
+
+
+async def handle_captcha(
+    page: Any,
+    prompt: str = "Solve CAPTCHA then click Continue",
+) -> bool:
+    """
+    Handle CAPTCHA after OAuth completes.
+
+    Flow:
+      1. Try auto-solve via Camoufox fingerprint (wait_for_turnstile)
+      2. If auto-solve fails → emit interact_required to UI
+      3. User solves CAPTCHA manually in InteractModal, clicks Continue
+      4. interact_gate returns "__continue__" → this function returns True
+
+    Returns:
+        True  → captcha solved (auto or manual)
+        False → user skipped/aborted, or non-interactive mode
+    """
+    from .utils import wait_for_turnstile
+
+    # Step 1: Try auto-solve via Camoufox anti-detect fingerprint
+    emit_progress("captcha", "auto", "Attempting auto-solve via Camoufox...")
+    turnstile_solved = await wait_for_turnstile(page, timeout=20.0)
+    if turnstile_solved:
+        emit_progress("captcha", "solved", "CAPTCHA auto-solved via Camoufox")
+        return True
+
+    # Step 2: Auto-solve failed → show interact modal for manual solve
+    emit_progress("captcha", "manual", "Auto-solve failed, waiting for manual CAPTCHA solve...")
+    result = await interact_mode(0, page, prompt)
+
+    # Step 3: Check user action
+    if result in ("__continue__", "__retry__"):
+        emit_progress("captcha", "solved", "CAPTCHA manually solved by user")
+        return True
+
+    # Non-interactive mode (empty string) or user aborted/skipped
+    emit_progress("captcha", "skip", "CAPTCHA not solved (skipped/aborted)")
+    return False
+
 
 async def handle_oauth_popup(
     page: Any, email: str, password: str, *,
     google_btn_sels: list | None = None,
     authorize_sels: list | None = None,
     skip_sels: list | None = None,
-    captcha_prompt: str | None = None,
-    captcha_before_popup: bool = False,
     close_new_tab: bool = False,
     post_auth_delay: int = 3,
     timeout: int = 15000,
     **kwargs
 ) -> bool | tuple[bool, Any]:
-    from .utils import click_first_visible, wait_for_turnstile
-    from .google import handle_google_account_chooser, is_google_consent_screen, handle_google_consent
+    """
+    Pure OAuth popup handler — handles Google login only, NO captcha.
 
-    if captcha_prompt and captcha_before_popup:
-        # Coba auto-solve Turnstile via Camoufox fingerprint dulu
-        turnstile_solved = await wait_for_turnstile(page, timeout=20.0)
-        if not turnstile_solved:
-            await interact_mode(0, page, captcha_prompt)
-        await asyncio.sleep(2)
+    Flow:
+      1. Detect/wait for popup tab
+      2. Click Google button (on main page or inside popup)
+      3. Handle Google account chooser / consent screen
+      4. Click skip/authorize buttons if provided
+      5. Close popup tab if close_new_tab=True
+
+    For CAPTCHA handling, call handle_captcha() separately AFTER this function.
+    """
+    from .utils import click_first_visible
+    from .google import handle_google_account_chooser, is_google_consent_screen, handle_google_consent
 
     # 1. Detect if there's already a popup or wait for one
     extra_page = None
@@ -88,19 +132,11 @@ async def handle_oauth_popup(
 
     # 2. Click the Google button (could be on main page or INSIDE the popup)
     if google_btn_sels:
-        # We click it on the extra_page (which could be the login popup)
-        # but only if it's NOT already Google domain
         if not any(d in extra_page.url for d in _GOOGLE_DOMAINS):
             await click_first_visible(extra_page, google_btn_sels, no_interact=True)
             await asyncio.sleep(2)
 
-    if captcha_prompt and not captcha_before_popup:
-        # Coba auto-solve Turnstile via Camoufox fingerprint dulu
-        turnstile_solved = await wait_for_turnstile(extra_page, timeout=20.0)
-        if not turnstile_solved:
-            await interact_mode(0, extra_page, captcha_prompt)
-        await asyncio.sleep(2)
-
+    # 3. Handle Google login flow
     if any(d in extra_page.url for d in _GOOGLE_DOMAINS):
         await asyncio.sleep(3)
         for _ in range(5):
@@ -112,15 +148,17 @@ async def handle_oauth_popup(
             await handle_google_consent(extra_page)
         await asyncio.sleep(post_auth_delay)
 
+    # 4. Click skip/authorize buttons (e.g. SKIP_BTN, AUTH_BTN inside popup)
     if skip_sels:
         await click_first_visible(extra_page, skip_sels)
     if authorize_sels:
         await asyncio.sleep(3)
         await click_first_visible(extra_page, authorize_sels)
 
+    # 5. Close popup if requested
     if (is_popup or close_new_tab) and extra_page is not page and not kwargs.get("dont_close"):
-        # If we detected a popup but have no automated flow defined, pause for manual only in interactive mode
-        if not google_btn_sels and not authorize_sels and not captcha_prompt:
+        # If no automated flow was defined, pause for manual interaction
+        if not google_btn_sels and not authorize_sels:
             from core.config import Config as _Cfg
             if _Cfg.INTERACTIVE_MODE:
                 await interact_mode(0, extra_page, "Manually complete the connection in the browser.")

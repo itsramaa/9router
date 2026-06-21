@@ -7,8 +7,9 @@ import asyncio
 import logging
 from typing import Any
 from core.selectors import SELECTORS
-from .base import emit_progress, emit_error, interact_mode, handle_oauth_popup
-from .dashboard import validate_and_save_to_dashboard
+from .base import emit_progress, emit_error, interact_mode, handle_oauth_popup, handle_captcha
+from .google_session import ensure_google_session
+from .dashboard import validate_and_save_to_dashboard, email_in_connection_list
 from .utils import (
     click_first_visible,
     fill_first_visible,
@@ -24,18 +25,36 @@ URL_KEYS = _S["URL_KEYS"]
 async def harvest(page: Any, email: str, password: str, provider: str = "openrouter") -> str:
     emit_progress(provider, "navigate", "Navigating to OpenRouter...")
     try:
+        # Skip if already connected
+        if await email_in_connection_list(email, provider=provider):
+            emit_progress(provider, "skip", f"⏭ Already connected ({email})")
+            return ""
+        
+        # Ensure Google session before triggering Clerk OAuth popup
+        emit_progress(provider, "google", "Ensuring Google session...")
+        await ensure_google_session(page, email, password)
+
         await safe_goto(page, URL_KEYS)
         await click_first_visible(page, _S["CLERK_GOOGLE_BTNS"])
         await asyncio.sleep(3)
 
-        emit_progress(provider, "captcha", "Waiting for user to solve CAPTCHA...")
+        # Step 1: Pure OAuth (no captcha)
         ok = await handle_oauth_popup(
             page, email, password,
-            captcha_prompt="OpenRouter — Selesaikan CAPTCHA lalu tekan ENTER",
-            captcha_before_popup=False,
         )
-        if not ok: return ""
+        if not ok:
+            return ""
 
+        # Step 2: Handle CAPTCHA separately after OAuth
+        emit_progress(provider, "captcha", "Waiting for user to solve CAPTCHA...")
+        captcha_solved = await handle_captcha(
+            page, "OpenRouter — Selesaikan CAPTCHA lalu klik Continue"
+        )
+        if not captcha_solved:
+            emit_progress(provider, "captcha", "CAPTCHA not solved, aborting")
+            return ""
+
+        # Step 3: Continue with next steps
         if await click_first_visible(page, _S["LEGAL_CHECKBOX"], retry=False, timeout=5000, no_interact=True):
             await click_first_visible(page, _S["LEGAL_SUBMIT"], retry=False, no_interact=True)
             await asyncio.sleep(3)
@@ -67,12 +86,12 @@ async def harvest(page: Any, email: str, password: str, provider: str = "openrou
 
             key = await get_text_first_visible(page, _S["EXTRACT_CODE"], retry=False)
             if key and len(key) >= 15:
-                await validate_and_save_to_dashboard(page, key, provider, email)
+                await validate_and_save_to_dashboard(key, provider, email)
                 return key
 
         key = await js_scan_for_key(page, r"sk-or-[A-Za-z0-9_-]{15,}")
         if key:
-            await validate_and_save_to_dashboard(page, key, provider, email)
+            await validate_and_save_to_dashboard(key, provider, email)
         return key
     except Exception as e:
         emit_error(provider, e); return ""

@@ -10,7 +10,7 @@ import { createProviderConnection } from "@/models";
  */
 export async function POST(request) {
   try {
-    const { apiKey, region } = await request.json();
+    const { apiKey, region, name } = await request.json();
 
     if (!apiKey || typeof apiKey !== "string" || !apiKey.trim()) {
       return NextResponse.json(
@@ -35,6 +35,7 @@ export async function POST(request) {
     const connection = await createProviderConnection({
       provider: "kiro",
       authType: "api_key",
+      name: name?.trim() || email || "Kiro",
       accessToken: credential.accessToken,
       refreshToken: null,
       expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),

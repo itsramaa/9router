@@ -67,8 +67,8 @@ class AccountSaver:
             try:
                 backup_path.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
             except Exception as e:
-                from .ui import warn
-                warn(f"Failed to backup {target.name}: {e}")
+                from .emit import Emit
+                Emit.call({"type": "warn", "message": f"Failed to backup {target.name}: {e}"})
 
         tmp_path = target.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(accounts, indent=2, ensure_ascii=False), encoding="utf-8")

@@ -18,7 +18,6 @@ from core.emit import Emit
 from core.interact import (
     interact_gate, update_interact_page, get_interact_page, get_interact_streamer
 )
-from core.ui import info
 
 DEBUG_LOG = os.getenv("DEBUG") == "1"
 
@@ -37,7 +36,10 @@ async def safe_goto(page: Any, url: str, timeout: int = 30000, idle_timeout: int
         await page.goto(url, wait_until="commit", timeout=timeout)
     except Exception as e:
         err_str = str(e).lower()
-        if "interrupted" not in err_str and "navigation" not in err_str:
+        # ns_error_unknown_protocol: Firefox/Gecko fails on custom protocols (e.g. kiro://)
+        # even when the route handler will intercept it — treat as non-fatal.
+        _NAV_ERRORS = ("interrupted", "navigation", "ns_error_unknown_protocol")
+        if not any(n in err_str for n in _NAV_ERRORS):
             raise
     try:
         await page.wait_for_load_state("domcontentloaded", timeout=5000)
@@ -191,7 +193,7 @@ async def _operate_on_first_visible(
             result = await interact_gate(slot, active_page, reason)
             
             if result == "__continue__":
-                info("Resuming automation: checking all variations...")
+                Emit.call({"type": "log", "message": "Resuming automation: checking all variations..."})
                 res = await _try_find_and_act(active_page, selectors, operation, value, force)
                 if res is not None: return res
                 
@@ -207,7 +209,7 @@ async def _operate_on_first_visible(
             elif result and result not in ("__continue__", "__retry__"): 
                 return result
             else:
-                info("Resuming automation: checking all variations...")
+                Emit.call({"type": "log", "message": "Resuming automation: checking all variations..."})
                 res = await _try_find_and_act(active_page, selectors, operation, value, force)
                 if res is not None: return res
                 return "" if operation in ("get_text", "get_value") else True

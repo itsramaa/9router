@@ -3,8 +3,7 @@ import {
   getProviderConnections,
   updateProviderConnection,
 } from "@/lib/localDb";
-
-const MODEL_LOCK_PREFIX = "modelLock_";
+import { MODEL_LOCK_PREFIX, getLockKey } from "open-sse/services/modelLockStore.js";
 
 function getActiveModelLocks(connection) {
   const now = Date.now();
@@ -21,10 +20,16 @@ function getActiveModelLocks(connection) {
 
 export async function GET() {
   try {
-    const connections = await getProviderConnections();
+    const now = Date.now();
+    const [activeConns, inactiveConns] = await Promise.all([
+      getProviderConnections(),
+      getProviderConnections({ isActive: false }),
+    ]);
+
     const models = [];
 
-    for (const connection of connections) {
+    // Active connections: per-model locks + account-unavailable
+    for (const connection of activeConns) {
       const locks = getActiveModelLocks(connection);
       for (const lock of locks) {
         models.push({
@@ -35,6 +40,7 @@ export async function GET() {
           connectionId: connection.id,
           connectionName: connection.name || connection.email || connection.id,
           lastError: connection.lastError || null,
+          reason: connection.lastError || null,
         });
       }
 
@@ -46,6 +52,24 @@ export async function GET() {
           connectionId: connection.id,
           connectionName: connection.name || connection.email || connection.id,
           lastError: connection.lastError || null,
+          reason: connection.lastError || null,
+        });
+      }
+    }
+
+    // Inactive connections: paused (auto, has pausedUntil) vs disabled (manual)
+    for (const connection of inactiveConns) {
+      const pausedUntil = connection.pausedUntil;
+      if (pausedUntil && new Date(pausedUntil).getTime() > now) {
+        models.push({
+          provider: connection.provider,
+          model: "__all",
+          status: "paused",
+          until: pausedUntil,
+          connectionId: connection.id,
+          connectionName: connection.name || connection.email || connection.id,
+          lastError: connection.lastError || null,
+          reason: connection.lastError || "quota exhausted",
         });
       }
     }
@@ -58,7 +82,7 @@ export async function GET() {
     console.error("[API] Failed to get model availability:", error);
     return NextResponse.json(
       { error: "Failed to fetch model availability" },
-      { status: 500 },
+      { status: 500 }
     );
   }
 }
@@ -72,7 +96,7 @@ export async function POST(request) {
     }
 
     const connections = await getProviderConnections({ provider });
-    const lockKey = `${MODEL_LOCK_PREFIX}${model}`;
+    const lockKey = getLockKey(model);
 
     await Promise.all(
       connections
@@ -88,8 +112,8 @@ export async function POST(request) {
                   backoffLevel: 0,
                 }
               : {}),
-          }),
-        ),
+          })
+        )
     );
 
     return NextResponse.json({ ok: true });
@@ -97,7 +121,7 @@ export async function POST(request) {
     console.error("[API] Failed to clear model cooldown:", error);
     return NextResponse.json(
       { error: "Failed to clear cooldown" },
-      { status: 500 },
+      { status: 500 }
     );
   }
 }

@@ -778,7 +778,8 @@ export default function ProviderDetailPage() {
   };
 
   const handleApplySinglePool = (proxyPoolId) => {
-    const targets = connections.map((c) => ({ connectionId: c.id, proxyPoolId }));
+    const scope = selectedConnectionIds.length > 0 ? connections.filter(c => selectedConnectionIds.includes(c.id)) : connections;
+    const targets = scope.map((c) => ({ connectionId: c.id, proxyPoolId }));
     return applyProxyAssignments(targets);
   };
 
@@ -788,11 +789,113 @@ export default function ProviderDetailPage() {
       alert("No active proxy pools available.");
       return;
     }
-    const targets = connections.map((c, i) => ({
+    const scope = selectedConnectionIds.length > 0 ? connections.filter(c => selectedConnectionIds.includes(c.id)) : connections;
+    const targets = scope.map((c, i) => ({
       connectionId: c.id,
       proxyPoolId: activePools[i % activePools.length].id,
     }));
     return applyProxyAssignments(targets);
+  };
+
+  const handleBulkActivate = async () => {
+    if (selectedConnectionIds.length === 0) return;
+    for (const id of selectedConnectionIds) {
+      try {
+        await fetch(`/api/providers/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isActive: true }),
+        });
+      } catch (e) {
+        console.log("Error activating connection:", id, e);
+      }
+    }
+    await fetchConnections();
+    clearSelection();
+  };
+
+  const handleBulkDeactivate = async () => {
+    if (selectedConnectionIds.length === 0) return;
+    for (const id of selectedConnectionIds) {
+      try {
+        await fetch(`/api/providers/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isActive: false }),
+        });
+      } catch (e) {
+        console.log("Error deactivating connection:", id, e);
+      }
+    }
+    await fetchConnections();
+    clearSelection();
+  };
+
+  const handleBulkTest = async () => {
+    if (selectedConnectionIds.length === 0) return;
+    const queuedState = Object.fromEntries(
+      selectedConnectionIds.map((id) => [id, { state: "queued", error: null }])
+    );
+    stopOneByOneRef.current = false;
+    setOneByOneRunning(true);
+    setOneByOneStopping(false);
+    setOneByOneCurrentConnectionId(null);
+    setOneByOneResults(queuedState);
+    setOneByOneSummary({ total: selectedConnectionIds.length, completed: 0, passed: 0, failed: 0, stopped: false });
+
+    let passed = 0;
+    let failed = 0;
+    const ids = [...selectedConnectionIds];
+
+    try {
+      for (let index = 0; index < ids.length; index += 1) {
+        if (stopOneByOneRef.current) {
+          setOneByOneSummary({ total: ids.length, completed: index, passed, failed, stopped: true });
+          break;
+        }
+        const id = ids[index];
+        setOneByOneCurrentConnectionId(id);
+        setOneByOneResults((prev) => ({ ...prev, [id]: { state: "testing", error: null } }));
+        try {
+          const res = await fetch(`/api/providers/${id}/test`, { method: "POST" });
+          const data = await res.json();
+          const valid = !!data.valid;
+          if (valid) passed += 1; else failed += 1;
+          setOneByOneResults((prev) => ({ ...prev, [id]: { state: valid ? "success" : "failed", error: valid ? null : (data.error || null) } }));
+        } catch (error) {
+          failed += 1;
+          setOneByOneResults((prev) => ({ ...prev, [id]: { state: "failed", error: error.message || "Test failed" } }));
+        }
+        setOneByOneSummary({ total: ids.length, completed: index + 1, passed, failed, stopped: false });
+        if (index < ids.length - 1) await sleep(ONE_BY_ONE_DELAY_MS);
+      }
+    } finally {
+      setOneByOneCurrentConnectionId(null);
+      setOneByOneRunning(false);
+      setOneByOneStopping(false);
+      stopOneByOneRef.current = false;
+    }
+  };
+
+  const handleBulkDelete = () => {
+    if (selectedConnectionIds.length === 0) return;
+    setConfirmState({
+      title: "Delete Selected Connections",
+      message: `Delete ${selectedConnectionIds.length} selected connection(s)? This cannot be undone.`,
+      onConfirm: async () => {
+        setConfirmState(null);
+        const ids = [...selectedConnectionIds];
+        clearSelection();
+        for (const id of ids) {
+          try {
+            await fetch(`/api/providers/${id}`, { method: "DELETE" });
+          } catch (e) {
+            console.log("Error deleting connection:", id, e);
+          }
+        }
+        await fetchConnections();
+      },
+    });
   };
 
 
@@ -803,6 +906,15 @@ export default function ProviderDetailPage() {
       {connections
         .map((conn, index) => (
           <div key={conn.id} className="flex min-w-0 items-stretch">
+            <div className="flex shrink-0 items-center px-1 sm:px-2">
+              <input
+                type="checkbox"
+                checked={isSelected(conn.id)}
+                onChange={() => toggleSelectConnection(conn.id)}
+                className="h-4 w-4 rounded border-border accent-primary cursor-pointer"
+                aria-label={"Select connection " + (conn.name || conn.id)}
+              />
+            </div>
             <div className="flex-1 min-w-0">
               <ConnectionRow
                 connection={conn}
@@ -854,7 +966,7 @@ export default function ProviderDetailPage() {
     <Modal
       isOpen={showBulkProxyModal}
       onClose={closeBulkProxyModal}
-      title={`Apply Proxy (${connections.length} connections)`}
+      title={`Apply Proxy (${selectedConnectionIds.length > 0 ? selectedConnectionIds.length + " selected" : connections.length + " connections"})`}
     >
       <div className="flex flex-col gap-3">
         <div className="flex flex-col">
@@ -1401,6 +1513,76 @@ export default function ProviderDetailPage() {
                       <span>Running: {connections.find((conn) => conn.id === oneByOneCurrentConnectionId)?.name || oneByOneCurrentConnectionId}</span>
                     )}
                   </div>
+                </div>
+              )}
+              {/* Bulk selection toolbar */}
+              {connections.length > 0 && (
+                <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-sidebar px-3 py-2">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={toggleSelectAllConnections}
+                    className="h-4 w-4 rounded border-border accent-primary cursor-pointer"
+                    aria-label="Select all connections"
+                  />
+                  <span className="text-xs text-text-muted">
+                    {selectedConnectionIds.length > 0 ? selectedConnectionIds.length + " selected" : "Select all"}
+                  </span>
+                  {selectedConnectionIds.length > 0 && (
+                    <>
+                      <div className="h-3 w-px bg-border" />
+                      <button
+                        onClick={handleBulkActivate}
+                        className="flex items-center gap-1 rounded px-2 py-1 text-xs text-text-muted hover:bg-black/5 hover:text-primary dark:hover:bg-white/5"
+                        title="Activate selected"
+                      >
+                        <span className="material-symbols-outlined text-[14px]">toggle_on</span>
+                        Activate
+                      </button>
+                      <button
+                        onClick={handleBulkDeactivate}
+                        className="flex items-center gap-1 rounded px-2 py-1 text-xs text-text-muted hover:bg-black/5 hover:text-primary dark:hover:bg-white/5"
+                        title="Deactivate selected"
+                      >
+                        <span className="material-symbols-outlined text-[14px]">toggle_off</span>
+                        Deactivate
+                      </button>
+                      <button
+                        onClick={handleBulkTest}
+                        disabled={oneByOneRunning}
+                        className="flex items-center gap-1 rounded px-2 py-1 text-xs text-text-muted hover:bg-black/5 hover:text-primary dark:hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Test selected"
+                      >
+                        <span className="material-symbols-outlined text-[14px]">sync</span>
+                        Test
+                      </button>
+                      {proxyPools.length > 0 && (
+                        <button
+                          onClick={openBulkProxyModal}
+                          className="flex items-center gap-1 rounded px-2 py-1 text-xs text-text-muted hover:bg-black/5 hover:text-primary dark:hover:bg-white/5"
+                          title="Apply proxy to selected"
+                        >
+                          <span className="material-symbols-outlined text-[14px]">lan</span>
+                          Proxy
+                        </button>
+                      )}
+                      <button
+                        onClick={handleBulkDelete}
+                        className="flex items-center gap-1 rounded px-2 py-1 text-xs text-red-500 hover:bg-red-500/10"
+                        title="Delete selected"
+                      >
+                        <span className="material-symbols-outlined text-[14px]">delete</span>
+                        Delete
+                      </button>
+                      <button
+                        onClick={clearSelection}
+                        className="ml-auto flex items-center gap-1 rounded px-2 py-1 text-xs text-text-muted hover:bg-black/5 dark:hover:bg-white/5"
+                      >
+                        <span className="material-symbols-outlined text-[14px]">close</span>
+                        Clear
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
               {connectionsList}

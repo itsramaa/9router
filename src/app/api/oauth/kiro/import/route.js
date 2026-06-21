@@ -8,7 +8,7 @@ import { createProviderConnection } from "@/models";
  */
 export async function POST(request) {
   try {
-    const { refreshToken } = await request.json();
+    const { refreshToken, name } = await request.json();
 
     if (!refreshToken || typeof refreshToken !== "string") {
       return NextResponse.json(
@@ -29,6 +29,7 @@ export async function POST(request) {
     const connection = await createProviderConnection({
       provider: "kiro",
       authType: "oauth",
+      name: name?.trim() || email || "Kiro",
       accessToken: tokenData.accessToken,
       refreshToken: tokenData.refreshToken,
       expiresAt: new Date(Date.now() + tokenData.expiresIn * 1000).toISOString(),

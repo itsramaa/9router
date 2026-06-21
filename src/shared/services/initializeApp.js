@@ -5,7 +5,6 @@ import { existsSync } from "fs";
 import { cleanupProviderConnections, getSettings, updateSettings, getApiKeys } from "@/lib/localDb";
 import {
   enableTunnel, enableTailscale,
-  isTunnelManuallyDisabled, isTunnelReconnecting, isTailscaleReconnecting,
   getTunnelService, getTailscaleService, setTunnelUnexpectedExitCallback,
   killCloudflared, isCloudflaredRunning, ensureCloudflared,
   isTailscaleRunning, isTailscaleRunningStrict, isDaemonAlive, startFunnel,
@@ -15,6 +14,9 @@ import {
 } from "@/lib/tunnel";
 import { getMitmStatus, startMitm, loadEncryptedPassword, initDbHooks, restoreToolDNS, removeAllDNSEntriesSync } from "@/mitm/manager";
 import { startClaudeAutoPing } from "@/shared/services/claudeAutoPing";
+import { register, start } from "@/shared/services/usageScheduler";
+import { runQuotaMonitorTick, QUOTA_SUPPORTED_PROVIDERS } from "open-sse/services/quotaMonitor.js";
+import { resumeExpiredPauses } from "@/shared/services/accountLifecycle";
 import { syncToJson as syncMitmAliasCache } from "@/lib/mitmAliasCache";
 
 // Inject correct paths and DB hooks into manager.js (CJS) from ESM context
@@ -50,14 +52,12 @@ export async function initializeApp() {
     await cleanupProviderConnections();
     const settings = await getSettings();
 
-    // Auto-resume tunnel (once per process)
     if (settings.tunnelEnabled && !g.tunnelAutoResumed) {
       g.tunnelAutoResumed = true;
       console.log("[InitApp] Tunnel was enabled, auto-resuming...");
       safeRestartTunnel("startup").catch((e) => console.log("[InitApp] Tunnel resume failed:", e.message));
     }
 
-    // Auto-resume tailscale (once per process)
     if (settings.tailscaleEnabled && !g.tailscaleAutoResumed) {
       g.tailscaleAutoResumed = true;
       console.log("[InitApp] Tailscale was enabled, auto-resuming...");
@@ -77,11 +77,8 @@ export async function initializeApp() {
     }
 
     ensureCloudflared().catch(() => {});
-
-    // Sync mitmAlias DB → JSON cache so standalone MITM server can read it
     syncMitmAliasCache().catch(() => {});
 
-    // Auto-respawn tunnel when cloudflared exits unexpectedly (e.g. network change drop)
     setTunnelUnexpectedExitCallback(() => {
       safeRestartTunnel("unexpected-exit").catch(() => {});
     });
@@ -89,7 +86,28 @@ export async function initializeApp() {
     startWatchdog();
     startNetworkMonitor();
     autoStartMitm();
+
+    // Claude auto-ping: warm 5h window right after reset
     startClaudeAutoPing();
+
+    // QuotaMonitor: proactive quota-based lock/pause/recovery every 10 min
+    register("quota-monitor", { tickFn: runQuotaMonitorTick, intervalMs: 10 * 60 * 1000 });
+
+    // BUG-011 fix: auto-resume paused accounts when pausedUntil has expired
+    register("pause-recovery", {
+      tickFn: async () => {
+        for (const provider of QUOTA_SUPPORTED_PROVIDERS) {
+          try {
+            await resumeExpiredPauses(provider);
+          } catch (e) {
+            console.warn(`[PauseRecovery] ${provider}: ${e.message}`);
+          }
+        }
+      },
+      intervalMs: 5 * 60 * 1000, // every 5 min
+    });
+
+    start();
   } catch (error) {
     console.error("[InitApp] Error:", error);
   }
@@ -130,10 +148,7 @@ async function autoStartMitm() {
 }
 
 // Cooldown only applies to repeating watchdog ticks (anti hammer-loop).
-// Network/exit events are one-shot transitions → bypass to recover fast.
 const FORCE_RESTART_REASONS = /^(startup|netchange|sleep|sleep\+netchange|online|unexpected-exit)$/;
-
-// ─── Safe restart (4 guards: spawn / cooldown / alive / internet) ────────────
 
 async function safeRestartTunnel(reason) {
   const svc = getTunnelService();
@@ -143,9 +158,6 @@ async function safeRestartTunnel(reason) {
   if (svc.spawnInProgress) return;
 
   const force = FORCE_RESTART_REASONS.test(reason);
-
-  // Process alive = trust cloudflared (self-reconnects via --retries 99, keeps same URL).
-  // Killing a live process on network change drops the tunnel and rotates the quick-tunnel URL.
   if (isCloudflaredRunning()) return;
 
   if (!force && Date.now() - svc.lastRestartAt < RESTART_COOLDOWN_MS) {
@@ -173,12 +185,9 @@ async function safeRestartTailscale(reason) {
   if (svc.cancelToken.cancelled) return;
   if (svc.spawnInProgress) return;
 
-  // Tailscale daemon is OS-level with built-in reconnect; trust it when running (even on netchange).
-  // Startup uses strict probe — cached state is cold after process/dev reload.
   const running = reason === "startup" ? await isTailscaleRunningStrict() : isTailscaleRunning();
   if (running) return;
 
-  // Daemon alive but funnel dropped → recover funnel only; never full-restart (preserves login/daemon).
   if (isDaemonAlive() && svc.activeLocalPort) {
     try {
       await startFunnel(svc.activeLocalPort);
@@ -207,8 +216,6 @@ async function safeRestartTailscale(reason) {
   }
 }
 
-// ─── Watchdog: 60s tick check both services ──────────────────────────────────
-
 function startWatchdog() {
   if (g.watchdogInterval) return;
   g.watchdogInterval = setInterval(() => {
@@ -217,8 +224,6 @@ function startWatchdog() {
   }, WATCHDOG_INTERVAL_MS);
   if (g.watchdogInterval.unref) g.watchdogInterval.unref();
 }
-
-// ─── Network monitor: detect IPv4 fingerprint change + sleep/wake ────────────
 
 function getNetworkFingerprint() {
   const interfaces = os.networkInterfaces();
@@ -253,17 +258,15 @@ function startNetworkMonitor() {
       const wasSleep = elapsed > NETWORK_CHECK_INTERVAL_MS * 6;
       if (networkChanged) g.lastNetworkFingerprint = currentFingerprint;
 
-      // Real reachability check (TCP 1.1.1.1:443) — not just interface presence
       const online = await checkInternet();
       const wasOffline = g.lastOnline === false;
       g.lastOnline = online;
 
-      if (!online) return; // no internet → idle, don't restart
+      if (!online) return;
 
-      const onlineEdge = wasOffline; // offline → online transition
+      const onlineEdge = wasOffline;
       if (!networkChanged && !wasSleep && !onlineEdge) return;
 
-      // Wait for DHCP/DNS to settle before probing
       await new Promise((r) => setTimeout(r, NETWORK_SETTLE_MS));
 
       const reason = onlineEdge ? "online"

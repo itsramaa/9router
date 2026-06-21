@@ -6,11 +6,16 @@ import PropTypes from "prop-types";
 import { Badge, Toggle, Tooltip } from "@/shared/components";
 import CooldownTimer from "./CooldownTimer";
 
+const BAN_KEYWORDS = ["banned", "suspended", "terminated", "blocked", "revoked"];
+
 export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onEdit, onDelete, oneByOneStatus = null, autoPing = null }) {
   const [showProxyDropdown, setShowProxyDropdown] = useState(false);
   const [updatingProxy, setUpdatingProxy] = useState(false);
+  const [isCooldown, setIsCooldown] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const proxyDropdownRef = useRef(null);
 
+  // Proxy config
   const proxyPoolMap = new Map((proxyPools || []).map((pool) => [pool.id, pool]));
   const boundProxyPoolId = connection.providerSpecificData?.proxyPoolId || null;
   const boundProxyPool = boundProxyPoolId ? proxyPoolMap.get(boundProxyPoolId) : null;
@@ -44,7 +49,7 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
     proxyBadgeVariant = "error";
   }
 
-  // Close dropdown when clicking outside
+  // Close proxy dropdown when clicking outside
   useEffect(() => {
     if (!showProxyDropdown) return;
     const handler = (e) => {
@@ -66,6 +71,7 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
     }
   };
 
+  // Auth display
   const rowAuthType = connection.authType || (isOAuth ? "oauth" : "apikey");
   const isOAuthConnection = rowAuthType === "oauth";
   const isCookieConnection = rowAuthType === "cookie";
@@ -81,18 +87,19 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
       ? connection.displayName.trim()
       : null;
 
-  // Use useState + useEffect for impure Date.now() to avoid calling during render
-  const [isCooldown, setIsCooldown] = useState(false);
-
-  // Get earliest model lock timestamp (useEffect handles the Date.now() comparison)
+  // Earliest per-model lock expiry
   const modelLockUntil = Object.entries(connection)
     .filter(([k]) => k.startsWith("modelLock_"))
     .map(([, v]) => v)
     .filter(v => !!v)
     .sort()[0] || null;
 
+  // Account-level pause (set by QuotaMonitor via AccountLifecycle.pause)
+  const pausedUntil = connection.pausedUntil || null;
+
+  // Per-model cooldown check (1s tick)
   useEffect(() => {
-    const checkCooldown = () => {
+    const check = () => {
       const until = Object.entries(connection)
         .filter(([k]) => k.startsWith("modelLock_"))
         .map(([, v]) => v)
@@ -100,20 +107,47 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
         .sort()[0] || null;
       setIsCooldown(!!until);
     };
-
-    checkCooldown();
-    const interval = modelLockUntil ? setInterval(checkCooldown, 1000) : null;
-    return () => {
-      if (interval) clearInterval(interval);
-    };
+    check();
+    const t = modelLockUntil ? setInterval(check, 1000) : null;
+    return () => { if (t) clearInterval(t); };
   }, [modelLockUntil]);
 
-  // Determine effective status (override unavailable if cooldown expired)
+  // Pause state check (10s tick — pausedUntil changes infrequently)
+  useEffect(() => {
+    const check = () => {
+      setIsPaused(
+        connection.isActive === false &&
+        !!pausedUntil &&
+        new Date(pausedUntil).getTime() > Date.now()
+      );
+    };
+    check();
+    const t = pausedUntil ? setInterval(check, 10000) : null;
+    return () => { if (t) clearInterval(t); };
+  }, [pausedUntil, connection.isActive]);
+
+  // Ban detection from lastError keywords
+  const isBanned = connection.isActive === false
+    && !!connection.lastError
+    && BAN_KEYWORDS.some(k => connection.lastError.toLowerCase().includes(k));
+
+  // Effective status: treat expired cooldown as active
   const effectiveStatus = (connection.testStatus === "unavailable" && !isCooldown)
-    ? "active"  // Cooldown expired u2192 treat as active
+    ? "active"
     : connection.testStatus;
 
-  const getStatusVariant = () => getConnectionStatusVariant(connection.isActive, effectiveStatus);
+  // Badge label reflects full lifecycle state
+  const statusLabel = isPaused ? "paused"
+    : isBanned ? "banned"
+    : connection.isActive === false ? "disabled"
+    : (effectiveStatus || "Unknown");
+
+  const getStatusVariant = () => getConnectionStatusVariant(
+    connection.isActive,
+    effectiveStatus,
+    pausedUntil,
+    connection.lastError
+  );
 
   const getOneByOneVariant = () => {
     if (!oneByOneStatus) return "default";
@@ -162,19 +196,31 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
           )}
           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 sm:gap-2">
             <Badge variant={getStatusVariant()} size="sm" dot>
-              {connection.isActive === false ? "disabled" : (effectiveStatus || "Unknown")}
+              {statusLabel}
             </Badge>
             <Badge variant="default" size="sm">
               {authLabel}
             </Badge>
             {hasAnyProxy && (
-              <Badge variant={proxyBadgeVariant} size="sm">
-                Proxy
-              </Badge>
+              <Badge variant={proxyBadgeVariant} size="sm">Proxy</Badge>
             )}
-            {isCooldown && connection.isActive !== false && <CooldownTimer until={modelLockUntil} />}
+            {/* Per-model cooldown timer (active accounts) */}
+            {isCooldown && connection.isActive !== false && (
+              <CooldownTimer until={modelLockUntil} />
+            )}
+            {/* Account-level pause countdown (auto-paused by QuotaMonitor) */}
+            {isPaused && pausedUntil && (
+              <CooldownTimer until={pausedUntil} />
+            )}
+            {/* Error text for active accounts */}
             {connection.lastError && connection.isActive !== false && (
               <span className="max-w-full truncate text-xs text-red-500 sm:max-w-[300px]" title={connection.lastError}>
+                {connection.lastError}
+              </span>
+            )}
+            {/* Pause reason for paused accounts */}
+            {isPaused && connection.lastError && (
+              <span className="max-w-full truncate text-xs text-orange-500 sm:max-w-[300px]" title={connection.lastError}>
                 {connection.lastError}
               </span>
             )}
@@ -209,7 +255,7 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
       </div>
       <div className="flex w-full items-center justify-between gap-2 sm:w-auto sm:justify-end">
         <div className="grid flex-1 grid-cols-3 gap-1 sm:flex sm:flex-none">
-          {/* Proxy button with inline dropdown */}
+          {/* Proxy dropdown */}
           {(proxyPools || []).length > 0 && (
             <div className="relative" ref={proxyDropdownRef}>
               <button
@@ -280,7 +326,7 @@ ConnectionRow.propTypes = {
     name: PropTypes.string,
     email: PropTypes.string,
     displayName: PropTypes.string,
-    modelLockUntil: PropTypes.string,
+    pausedUntil: PropTypes.string,
     testStatus: PropTypes.string,
     isActive: PropTypes.bool,
     lastError: PropTypes.string,

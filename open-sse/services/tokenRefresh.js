@@ -58,8 +58,10 @@ export function parseVertexSaJson(apiKey) {
   }
 }
 
-// Cache Vertex tokens keyed by service account email { token, expiresAt }
-const vertexTokenCache = new Map();
+// BUG-038 fix: use global.__ to survive Next.js hot reload
+// Module-level Map resets on hot reload → Vertex tokens re-minted unnecessarily → rate limit Google OAuth
+const _vtg = (global.__tokenRefreshState ??= { vertexTokenCache: new Map() });
+const vertexTokenCache = _vtg.vertexTokenCache;
 
 export async function refreshVertexToken(saJson, log) {
   const cacheKey = saJson.client_email;
@@ -128,7 +130,7 @@ const REFRESH_HANDLERS = {
   kiro: (c, log) => refreshKiroToken(c.refreshToken, c.providerSpecificData, log),
   xai: (c, log) => refreshXaiToken(c.refreshToken, log),
   vertex: vertexRefreshHandler,
-  "vertex-partner": vertexRefreshHandler
+  "vertex-partner": vertexRefreshHandler,
 };
 
 export async function getAccessToken(provider, credentials, log) {
@@ -151,10 +153,16 @@ async function _getAccessTokenInternal(provider, credentials, log) {
   return handler(credentials, log);
 }
 
+// BUG-042 fix: unknown provider returns null with debug log instead of silently
+// falling back to refreshAccessToken which may not support the provider
 export async function refreshTokenByProvider(provider, credentials, log) {
   if (!credentials.refreshToken) return null;
   const handler = REFRESH_HANDLERS[provider];
-  return handler ? handler(credentials, log) : refreshAccessToken(provider, credentials.refreshToken, credentials, log);
+  if (!handler) {
+    log?.debug?.("TOKEN_REFRESH", `No refresh handler for provider: ${provider} — skipping refresh`);
+    return null;
+  }
+  return handler(credentials, log);
 }
 
 export function formatProviderCredentials(provider, credentials, log) {
@@ -166,63 +174,34 @@ export function formatProviderCredentials(provider, credentials, log) {
 
   switch (provider) {
     case "gemini":
-      return {
-        apiKey: credentials.apiKey,
-        accessToken: credentials.accessToken,
-        projectId: credentials.projectId
-      };
-
+      return { apiKey: credentials.apiKey, accessToken: credentials.accessToken, projectId: credentials.projectId };
     case "claude":
-      return {
-        apiKey: credentials.apiKey,
-        accessToken: credentials.accessToken
-      };
-
+      return { apiKey: credentials.apiKey, accessToken: credentials.accessToken };
     case "codex":
     case "qwen":
     case "iflow":
     case "openai":
     case "openrouter":
     case "xai":
-      return {
-        apiKey: credentials.apiKey,
-        accessToken: credentials.accessToken
-      };
-
+      return { apiKey: credentials.apiKey, accessToken: credentials.accessToken };
     case "antigravity":
     case "gemini-cli":
-      return {
-        accessToken: credentials.accessToken,
-        refreshToken: credentials.refreshToken,
-        projectId: credentials.projectId
-      };
-
+      return { accessToken: credentials.accessToken, refreshToken: credentials.refreshToken, projectId: credentials.projectId };
     default:
-      return {
-        apiKey: credentials.apiKey,
-        accessToken: credentials.accessToken,
-        refreshToken: credentials.refreshToken
-      };
+      return { apiKey: credentials.apiKey, accessToken: credentials.accessToken, refreshToken: credentials.refreshToken };
   }
 }
 
 export async function getAllAccessTokens(userInfo, log) {
   const results = {};
-
   if (userInfo.connections && Array.isArray(userInfo.connections)) {
     for (const connection of userInfo.connections) {
       if (connection.isActive && connection.provider) {
-        const token = await getAccessToken(connection.provider, {
-          refreshToken: connection.refreshToken
-        }, log);
-
-        if (token) {
-          results[connection.provider] = token;
-        }
+        const token = await getAccessToken(connection.provider, { refreshToken: connection.refreshToken }, log);
+        if (token) results[connection.provider] = token;
       }
     }
   }
-
   return results;
 }
 
@@ -233,7 +212,6 @@ export async function refreshWithRetry(refreshFn, maxRetries = 3, log = null) {
       log?.debug?.("TOKEN_REFRESH", `Retry ${attempt}/${maxRetries} after ${delay}ms`);
       await new Promise(r => setTimeout(r, delay));
     }
-
     try {
       const result = await refreshFn();
       if (result) return result;
@@ -241,7 +219,6 @@ export async function refreshWithRetry(refreshFn, maxRetries = 3, log = null) {
       log?.warn?.("TOKEN_REFRESH", `Attempt ${attempt + 1}/${maxRetries} failed: ${error.message}`);
     }
   }
-
   log?.error?.("TOKEN_REFRESH", `All ${maxRetries} retry attempts failed`);
   return null;
 }

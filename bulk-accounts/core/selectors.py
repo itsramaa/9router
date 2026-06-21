@@ -213,7 +213,7 @@ SELECTORS = {
         "ONBOARD_GAP_BTN": ["button.gap-4:nth-child(1)"],
         "ONBOARD_COPY_BTN": ["button.leading-6:nth-child(2)"],
         "ONBOARD_CONTINUE": ["button:has-text('Continue')"],
-        "ONBOARD_SKIP": ["button:has-text(\"I'll do this later\")"],
+        "ONBOARD_SKIP": ['button:has-text("I\'ll do this later")'],
         "ONBOARD_FLEX_BTN": ["button.flex:nth-child(7)"],
         "ONBOARD_DASHBOARD": ["button:has-text('Go to Dashboard')"],
     },
@@ -264,7 +264,10 @@ SELECTORS = {
         "TOKEN_RESULT_CODE": "#token-create-drawer pre > code",
         # Dashboard Relay Deploy
         "URL_PROXY_POOLS": "http://localhost:20128/dashboard/proxy-pools",
-        "DEPLOY_RELAY_BTN": ["button.hover\:bg-brand-600:nth-child(1)", "button:has-text('Deploy Relay')"],
+        "DEPLOY_RELAY_BTN": [
+            "button.hover\:bg-brand-600:nth-child(1)",
+            "button:has-text('Deploy Relay')",
+        ],
         "DENO_RELAY_OPTION": "button:has-text('Deno Relay')",
         "INPUT_TOKEN": "input[placeholder='ddo_xxxxxxxxxxxxxxxx']",
         "INPUT_DOMAIN": "input[placeholder='your-org.deno.net']",
@@ -277,13 +280,12 @@ SELECTORS = {
         "KIRO_REDIRECT_URI": "kiro://kiro.kiroAgent/authenticate-success",
         "KIRO_TOKEN_ENDPOINT": "https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token",
         "GOOGLE_BTNS": [
-             "button:has-text('Continue with Google')",
-             "button:has-text('Google')",
+            "button:has-text('Continue with Google')",
+            "button:has-text('Google')",
         ],
     },
     # ── Local Dashboard Common Selectors ──────────────────────────────────────
     "local_provider": {
-        "DASHBOARD_LOGIN_URL": f"{Config.DASHBOARD_BASE_URL}/login",
         "DASHBOARD_PROVIDERS_URL": f"{Config.DASHBOARD_BASE_URL}/dashboard/providers",
         "PASS_INPUT": [
             "input[type='password']",
@@ -304,6 +306,8 @@ SELECTORS = {
         "ADD_BTN": [
             "button:has-text('Add'):has(.material-symbols-outlined)",
             "button:has-text('Add Key')",
+            "button:has-text('Add Connection')",
+            "button.bg-primary",
         ],
         "KIRO_IMPORT_BTN": ["div > div > button:nth-child(7)"],
         "KIRO_NAME_INPUT": [
@@ -342,11 +346,11 @@ SELECTORS = {
         ],
         "APPLY_PROXY_BTN": [
             "button:has-text('Apply Proxy')",
-            "div.mb-4.flex.flex-col.gap-3.sm\:flex-row.sm\:items-center.sm\:justify-between > div > button:nth-child(1)"
+            "div.mb-4.flex.flex-col.gap-3.sm\:flex-row.sm\:items-center.sm\:justify-between > div > button:nth-child(1)",
         ],
         "CONFIRM_PROXY_BTN": [
             "div.p-6.max-h-\[calc\(85vh-100px\)\].overflow-y-auto.custom-scrollbar > div > div > button:nth-child(1)",
-            "div.relative.w-full.bg-surface.border button:nth-child(1)"
+            "div.relative.w-full.bg-surface.border button:nth-child(1)",
         ],
         "VALID_KEY": [
             "span:has-text('Valid')",
@@ -366,11 +370,6 @@ SELECTORS = {
             "div.fixed.inset-0 input[readonly]",
             "div.fixed.inset-0 input",
             "div[role='dialog'] input[readonly]",
-        ],
-        "ADD_BTN": [
-            "button:has-text('Add'):has(.material-symbols-outlined)",
-            "button:has-text('Add Connection')",
-            "button.bg-primary",
         ],
         "MODAL_API_NAME_INPUT": [
             r"body > div.flex.h-screen.w-full.overflow-hidden.bg-bg > main > div.flex-1.overflow-y-auto.custom-scrollbar.p-6.lg\:p-10 > div > div > div.fixed.inset-0.z-50.flex.items-center.justify-center.p-4 > div.relative.w-full.bg-surface.border.border-border-subtle.rounded-\[14px\].shadow-\[var\(--shadow-elev\)\].fade-in.max-w-md > div.p-6.max-h-\[calc\(85vh-100px\)\].overflow-y-auto.custom-scrollbar > div > div:nth-child(2) > div > input",
@@ -407,7 +406,7 @@ SELECTORS = {
             "button:has-text('I Understand, Continue')",
         ],
     },
-    "kilo_code": {  
+    "kilocode": {
         "ADD_BTN": [
             "button:has-text('Add'):has(.material-symbols-outlined)",
         ],

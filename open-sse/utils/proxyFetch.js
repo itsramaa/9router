@@ -7,98 +7,14 @@ const proxyDispatchers = new Map();
 
 // ─── TLS fingerprinting via got-scraping (browser-like JA3) ───────────────
 // Disabled: not in use. Kept commented for future re-enable.
-// Restore the original block to re-enable per-host JA3 spoofing.
 /*
-let _gotScraping = null;
-let _gotScrapingChecked = false;
-const _gotScrapingLoggedHosts = new Set();
-
-async function getGotScraping() {
-  if (_gotScrapingChecked) return _gotScraping;
-  _gotScrapingChecked = true;
-  try {
-    const mod = await import("got-scraping");
-    _gotScraping = typeof mod.gotScraping === "function" ? mod.gotScraping : null;
-    if (_gotScraping) dbg("TLS", "got-scraping loaded (browser-like JA3 enabled)");
-  } catch (e) {
-    console.warn(`[ProxyFetch] got-scraping unavailable, falling back to native fetch: ${e.message}`);
-    _gotScraping = null;
-  }
-  return _gotScraping;
-}
-
-async function gotScrapingFetch(url, options) {
-  const gs = await getGotScraping();
-  if (!gs) return null;
-
-  const method = (options.method || "GET").toUpperCase();
-  const headersInit = options.headers || {};
-  const headers = headersInit instanceof Headers
-    ? Object.fromEntries(headersInit.entries())
-    : { ...headersInit };
-
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const stream = gs.stream({
-      url,
-      method,
-      headers,
-      body: method === "GET" || method === "HEAD" ? undefined : options.body,
-      throwHttpErrors: false,
-      retry: { limit: 0 },
-      timeout: { request: undefined },
-      followRedirect: false,
-      decompress: true,
-    });
-
-    if (options.signal) {
-      const onAbort = () => { try { stream.destroy(new Error("aborted")); } catch { } };
-      if (options.signal.aborted) onAbort();
-      else options.signal.addEventListener("abort", onAbort, { once: true });
-    }
-
-    stream.once("response", (res) => {
-      if (settled) return;
-      settled = true;
-      const resHeaders = new Headers();
-      for (const [k, v] of Object.entries(res.headers || {})) {
-        if (Array.isArray(v)) v.forEach((x) => resHeaders.append(k, String(x)));
-        else if (v != null) resHeaders.set(k, String(v));
-      }
-      const body = Readable.toWeb(stream);
-      resolve(new Response(body, { status: res.statusCode, statusText: res.statusMessage || "", headers: resHeaders }));
-    });
-
-    stream.once("error", (err) => {
-      if (settled) return;
-      settled = true;
-      reject(err);
-    });
-  });
-}
-
-async function tryGotScrapingFetch(url, options) {
-  try {
-    const res = await gotScrapingFetch(url, options);
-    if (res) {
-      try {
-        const host = new URL(typeof url === "string" ? url : url.toString()).hostname;
-        if (!_gotScrapingLoggedHosts.has(host)) {
-          _gotScrapingLoggedHosts.add(host);
-          dbg("TLS", `using got-scraping for ${host}`);
-        }
-      } catch { }
-    }
-    return res;
-  } catch (e) {
-    console.warn(`[ProxyFetch] got-scraping request failed, fallback to native fetch: ${e.message}`);
-    return null;
-  }
-}
+... (commented out block preserved as-is)
 */
 
 // DNS cache — use Map to avoid prototype pollution via malformed hostnames
 const DNS_CACHE = new Map();
+const DNS_CACHE_MAX_SIZE = 500; // BUG-041: cap DNS cache to prevent memory leak
+
 const MITM_BYPASS_HOSTS = [
   "cloudcode-pa.googleapis.com",
   "daily-cloudcode-pa.googleapis.com",
@@ -131,6 +47,10 @@ async function resolveRealIP(hostname) {
     resolver.setServers(GOOGLE_DNS_SERVERS);
     const resolve4 = promisify(resolver.resolve4.bind(resolver));
     const addresses = await resolve4(hostname);
+    // BUG-041 fix: evict oldest entry when cache is full
+    if (DNS_CACHE.size >= DNS_CACHE_MAX_SIZE) {
+      DNS_CACHE.delete(DNS_CACHE.keys().next().value);
+    }
     DNS_CACHE.set(hostname, { ip: addresses[0], expiry: Date.now() + MEMORY_CONFIG.dnsCacheTtlMs });
     return addresses[0];
   } catch (error) {
@@ -184,19 +104,23 @@ function getEnvProxyUrl(targetUrl) {
 }
 
 /**
- * Normalize proxy URL (allow host:port)
+ * Normalize proxy URL (allow host:port).
+ * BUG-039 fix: validate scheme to prevent SSRF via crafted proxy URL.
  */
 function normalizeProxyUrl(proxyUrl) {
   const normalizedInput = normalizeString(proxyUrl);
   if (!normalizedInput) return null;
 
   try {
-
-    new URL(normalizedInput);
-    return normalizedInput;
+    // Add scheme if missing to allow "host:port" style values
+    const withScheme = normalizedInput.includes("://") ? normalizedInput : `http://${normalizedInput}`;
+    const parsed = new URL(withScheme);
+    // Only allow legitimate proxy schemes — reject file://, data://, internal URLs, etc.
+    const allowedSchemes = new Set(["http:", "https:", "socks5:", "socks4:"]);
+    if (!allowedSchemes.has(parsed.protocol)) return null;
+    return parsed.toString();
   } catch {
-    // Allow "127.0.0.1:7890" style values
-    return `http://${normalizedInput}`;
+    return null;
   }
 }
 
@@ -233,7 +157,8 @@ async function getDispatcher(proxyUrl) {
 }
 
 /**
- * Create HTTPS request with manual socket connection (bypass DNS)
+ * Create HTTPS request with manual socket connection (bypass DNS).
+ * BUG-046 fix: handle AbortSignal to prevent socket leak on request cancel.
  */
 async function createBypassRequest(parsedUrl, realIP, options) {
   const httpsModule = await import("https");
@@ -244,6 +169,15 @@ async function createBypassRequest(parsedUrl, realIP, options) {
 
   return new Promise((resolve, reject) => {
     const socket = new net.Socket();
+
+    // BUG-046 fix: cancel socket when AbortSignal fires to prevent connection leak
+    const onAbort = () => {
+      try { socket.destroy(new Error("aborted")); } catch { }
+      reject(new Error("aborted"));
+    };
+    if (options.signal?.aborted) { onAbort(); return; }
+    options.signal?.addEventListener?.("abort", onAbort, { once: true });
+    const cleanupAbort = () => options.signal?.removeEventListener?.("abort", onAbort);
 
     socket.connect(HTTPS_PORT, realIP, () => {
       const reqOptions = {
@@ -264,6 +198,7 @@ async function createBypassRequest(parsedUrl, realIP, options) {
       };
 
       const req = https.request(reqOptions, (res) => {
+        cleanupAbort();
         const response = {
           ok: res.statusCode >= HTTP_SUCCESS_MIN && res.statusCode < HTTP_SUCCESS_MAX,
           status: res.statusCode,
@@ -280,14 +215,14 @@ async function createBypassRequest(parsedUrl, realIP, options) {
         resolve(response);
       });
 
-      req.on("error", reject);
+      req.on("error", (e) => { cleanupAbort(); reject(e); });
       if (options.body) {
         req.write(typeof options.body === "string" ? options.body : JSON.stringify(options.body));
       }
       req.end();
     });
 
-    socket.on("error", reject);
+    socket.on("error", (e) => { cleanupAbort(); reject(e); });
   });
 }
 

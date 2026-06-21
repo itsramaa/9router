@@ -1,18 +1,16 @@
 import { NextResponse } from "next/server";
-import { getRequestDetails } from "@/lib/requestDetailsDb";
+import { getDistinctProviders } from "@/lib/db/repos/requestDetailsRepo";
 import { getProviderNodes } from "@/lib/localDb";
 import { AI_PROVIDERS, getProviderByAlias } from "@/shared/constants/providers";
 
 /**
  * GET /api/usage/providers
- * Returns list of unique providers from request details
+ * BUG-030 fix: use SELECT DISTINCT query instead of loading 9999 rows to memory
  */
 export async function GET() {
   try {
-    const { details } = await getRequestDetails({ pageSize: 9999 });
-
-    // Extract unique providers
-    const providerIds = [...new Set(details.map(r => r.provider).filter(Boolean))].sort();
+    // Single SQL query — no full-table scan
+    const providerIds = await getDistinctProviders();
 
     const providerNodes = await getProviderNodes();
     const nodeMap = {};

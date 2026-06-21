@@ -1,14 +1,15 @@
 from __future__ import annotations
+
 """
-dashboard.py — Integration with 9router dashboard.
+dashboard.py — Direct HTTP integration with 9router.
 
-validate_and_save_to_dashboard now uses the direct HTTP API endpoint
-POST /api/automation/inject-key instead of browser navigation.
-This eliminates fragile selector-based UI automation and is faster.
+All three public functions now use the 9router HTTP API directly —
+no browser navigation required.
 
-Browser-based helpers (dashboard_login, email_in_connection_list,
-apply_proxy_to_all_providers) are kept for backwards compatibility
-but validate_and_save_to_dashboard no longer uses the browser.
+  validate_and_save_to_dashboard  POST /api/automation/inject-key
+  email_in_connection_list        GET  /api/providers
+
+that still need a logged-in browser session to complete OAuth flows.
 """
 
 import asyncio
@@ -20,33 +21,36 @@ import httpx
 from core.config import Config
 from core.selectors import SELECTORS as _S
 from .base import emit_progress, emit_error, interact_mode
-from .utils import click_first_visible, fill_first_visible, get_text_first_visible, safe_goto
+from .utils import click_first_visible, fill_first_visible, safe_goto
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-# ── Direct HTTP inject (new, preferred) ─────────────────────────────────────
-
-def _inject_url() -> str:
-    base = Config.DASHBOARD_BASE_URL.rstrip("/")
-    return f"{base}/api/automation/inject-key"
-
-def _inject_token() -> str | None:
-    return os.environ.get("AUTOMATION_INJECT_TOKEN")
+def _headers(provider: str) -> dict:
+    h = {"Content-Type": "application/json"}
+    h = {"Referer": f"http://localhost:20128/dashboard/providers/{provider}"}
+    return h
 
 
-async def validate_and_save_to_dashboard(page: Any, key: str, provider: str, email: str) -> None:
-    """
-    Add a harvested key directly to 9router's database via HTTP API.
-    No browser navigation required.
-    """
+async def validate_and_save_to_dashboard(
+    key: str,
+    provider: str,
+    email: str,
+) -> None:
+    """Validate key then save to 9router dashboard."""
     try:
-        emit_progress(provider, "dashboard", f"Injecting key to 9router via API...")
+        emit_progress(
+            provider,
+            "dashboard",
+            f"Injecting key {provider} to 9router via API...",
+        )
 
-        headers = {"Content-Type": "application/json"}
-        token = _inject_token()
-        if token:
-            headers["x-automation-token"] = token
+        is_valid_key = "unknown"
 
-        payload = {
+        # =========================
+        # Validate Key
+        # =========================
+        validate_payload = {
             "provider": provider,
             "key": key,
             "email": email,
@@ -54,103 +58,212 @@ async def validate_and_save_to_dashboard(page: Any, key: str, provider: str, ema
         }
 
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(_inject_url(), json=payload, headers=headers)
+            resp = await client.post(
+                f"{Config.DASHBOARD_BASE_URL}/api/providers/validate",
+                json=validate_payload,
+                headers=_headers(provider),
+            )
 
-        if resp.status_code in (200, 201):
+        if resp.status_code == 200:
             data = resp.json()
-            if data.get("ok"):
-                emit_progress(provider, "dashboard_ok", f"✓ Key injected to 9router (id={data.get('id', '?')})")
+            if data.get("valid"):
+                emit_progress(
+                    provider,
+                    "dashboard",
+                    "✓ Key Valid",
+                )
+                is_valid_key = "true"
             else:
-                emit_progress(provider, "warn", f"inject-key returned error: {data.get('error')}")
-        elif resp.status_code == 401:
-            emit_progress(provider, "warn", "inject-key: Unauthorized — set AUTOMATION_INJECT_TOKEN env var")
-        elif resp.status_code == 400:
-            data = resp.json()
-            emit_progress(provider, "warn", f"inject-key: {data.get('error', 'bad request')}")
+                emit_progress(
+                    provider,
+                    "warn",
+                    f"Validation key returned error: {data.get('error')}",
+                )
+                is_valid_key = "false"
         else:
-            emit_progress(provider, "warn", f"inject-key: HTTP {resp.status_code}")
+            emit_progress(
+                provider,
+                "error",
+                f"Validation key: HTTP {resp.status_code}",
+            )
 
-    except httpx.ConnectError:
-        emit_progress(provider, "warn", f"inject-key: Cannot connect to {Config.DASHBOARD_BASE_URL} — is 9router running?")
-    except Exception as e:
-        emit_progress(provider, "warn", f"validate_and_save_to_dashboard failed: {e}")
+        # =========================
+        # Build Save Payload
+        # =========================
+        if provider == "kiro":
+            endpoint = "/api/oauth/kiro/import"
+            save_payload = {
+                "name": email,
+                "refreshToken": key,
+            }
+        else:
+            endpoint = "/api/providers"
+            save_payload = {
+                "name": email,
+                "provider": provider,
+                "apiKey": key,
+                "priority": 1,
+                "proxyPoolId": None,
+                "testStatus": is_valid_key,
+            }
 
-
-# ── Browser-based helpers (kept for compatibility) ───────────────────────────
-
-async def dashboard_login(page: Any) -> None:
-    """Login to local 9router dashboard if not already logged in."""
-    _LP = _S["local_provider"]
-    await safe_goto(page, _LP["DASHBOARD_LOGIN_URL"], timeout=10000)
-    await asyncio.sleep(3)
-    if "login" not in page.url:
-        return
-
-    await fill_first_visible(page, _LP["PASS_INPUT"], "123456", timeout=5000, no_interact=True)
-    await asyncio.sleep(3)
-    await click_first_visible(page, _LP["LOGIN_BTN"], timeout=5000, no_interact=True)
-    await asyncio.sleep(1)
-    if "login" in page.url:
-        await interact_mode(0, page, "Harap login ke Dashboard 9router lalu tekan ENTER")
-    emit_progress("dashboard", "login", "Login 9router Successfully")
-
-
-async def email_in_connection_list(page: Any, email: str) -> bool:
-    """Check if email already exists in the 9router Connections section via HTTP API."""
-    try:
-        headers = {}
-        token = _inject_token()
-        if token:
-            headers["x-automation-token"] = token
-
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                f"{Config.DASHBOARD_BASE_URL}/api/providers",
-                headers=headers,
+        # =========================
+        # Save Key
+        # =========================
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{Config.DASHBOARD_BASE_URL}{endpoint}",
+                json=save_payload,
+                headers=_headers(provider),
             )
 
         if resp.status_code != 200:
+            emit_progress(
+                provider,
+                "error",
+                f"Save key failed: HTTP {resp.status_code}",
+            )
+            return
+
+        data = resp.json()
+
+        if provider == "kiro":
+            if data.get("success"):
+                emit_progress(
+                    provider,
+                    "dashboard",
+                    f"✓ Save {provider} credentials for {email} successfully",
+                )
+            else:
+                emit_progress(
+                    provider,
+                    "warn",
+                    f"Save failed: {data.get('error')}",
+                )
+
+        else:
+            connection = data.get("connection", {})
+
+            if connection.get("isActive"):
+                emit_progress(
+                    provider,
+                    "dashboard",
+                    f"✓ Save {provider} credentials for {email} successfully",
+                )
+            else:
+                emit_progress(
+                    provider,
+                    "warn",
+                    f"Save failed: {data.get('error')}",
+                )
+
+    except httpx.ConnectError:
+        emit_progress(
+            provider,
+            "warn",
+            f"Cannot connect to {Config.DASHBOARD_BASE_URL} — is 9router running?",
+        )
+
+    except Exception as e:
+        emit_progress(
+            provider,
+            "warn",
+            f"validate_and_save_to_dashboard failed: {e}",
+        )
+
+
+async def email_in_connection_list(
+    email: str,
+    provider: str = "",
+) -> bool:
+    """
+    Check whether an email already exists in 9router.
+
+    - Case-insensitive.
+    - Trims whitespace on both sides.
+    - Checks both email and name fields.
+    - Scopes search to a specific provider when provided.
+    - Handles null/missing fields safely.
+    """
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{Config.DASHBOARD_BASE_URL}/api/providers",
+                headers=_headers(provider),
+            )
+
+        if resp.status_code != 200:
+            emit_progress(
+                "dashboard",
+                "warn",
+                f"Failed to fetch providers: HTTP {resp.status_code}",
+            )
             return False
 
         data = resp.json()
-        connections = data.get("connections", [])
-        norm = email.strip().lower()
+
+        connections = data.get("connections") or []
+
+        if not isinstance(connections, list):
+            emit_progress(
+                "dashboard",
+                "warn",
+                "Invalid providers response: connections is not a list",
+            )
+            return False
+
+        normalized_email = email.strip().lower()
+
+        normalized_provider = provider.strip().lower() if provider else ""
+
+        if normalized_provider:
+            connections = [
+                connection
+                for connection in connections
+                if (
+                    (connection.get("provider") or "").strip().lower()
+                    == normalized_provider
+                )
+            ]
+
         found = any(
-            (c.get("email") or "").lower() == norm or
-            (c.get("name") or "").lower() == norm
-            for c in connections
+            normalized_email == (connection.get("email") or "").strip().lower()
+            or normalized_email == (connection.get("name") or "").strip().lower()
+            for connection in connections
         )
-        emit_progress("dashboard", "check email", f"Email: {email} already connected: {found}")
+
+        emit_progress(
+            "dashboard",
+            "check_email",
+            (
+                f"Email {normalized_email} already exists "
+                f"in 9router ({normalized_provider or 'any'}): {found}"
+            ),
+        )
+
         return found
 
-    except Exception:
+    except httpx.TimeoutException:
+        emit_progress(
+            "dashboard",
+            "warn",
+            "Timeout while checking existing connections",
+        )
         return False
 
+    except httpx.HTTPError as e:
+        emit_progress(
+            "dashboard",
+            "warn",
+            f"HTTP error while checking existing connections: {e}",
+        )
+        return False
 
-async def apply_proxy_to_all_providers(page: Any) -> None:
-    """Iterate through all providers and click Apply Proxy on their dashboard pages."""
-    _L = _S["local_provider"]
-    emit_progress("dashboard", "proxy_sync", "Final Step: Activating Proxy for all providers...")
-
-    await dashboard_login(page)
-
-    targets = [p for p in Config.ALL_PROVIDERS if p not in ["antigravity"]]
-
-    for provider in targets:
-        try:
-            emit_progress(provider, "proxy", f"Activating Proxy for {provider}...")
-            await safe_goto(page, f"{Config.DASHBOARD_BASE_URL}/dashboard/providers/{provider}")
-            await asyncio.sleep(2)
-
-            if await click_first_visible(page, _L["APPLY_PROXY_BTN"], timeout=5000, no_interact=True):
-                await asyncio.sleep(1)
-                await click_first_visible(page, _L["CONFIRM_PROXY_BTN"], timeout=5000, no_interact=True)
-                await asyncio.sleep(5)
-                emit_progress(provider, "proxy_ok", f"Proxy activated for {provider}")
-            else:
-                emit_progress(provider, "proxy_skip", f"Apply Proxy button not found for {provider}, skipping.")
-
-        except Exception as e:
-            emit_progress(provider, "proxy_err", f"Failed to apply proxy for {provider}: {e}")
-
-    emit_progress("dashboard", "done", "All provider proxies synchronized!")
+    except Exception as e:
+        emit_progress(
+            "dashboard",
+            "warn",
+            f"email_in_connection_list failed: {e}",
+        )
+        return False

@@ -1,4 +1,5 @@
 // Claude auto-ping scheduler: warms the 5h window by sending a tiny request right after reset.
+// Registered with UsageScheduler so the pattern is generalized and hot-reload safe.
 import "open-sse/index.js";
 
 import { getSettings, getProviderConnections, updateProviderConnection } from "@/lib/localDb";
@@ -6,13 +7,15 @@ import { getClaudeUsage } from "open-sse/services/usage/claude.js";
 import { CLAUDE_CLI_SPOOF_HEADERS } from "open-sse/providers/shared.js";
 import { proxyAwareFetch } from "open-sse/utils/proxyFetch.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
-import { refreshAndUpdateCredentials } from "@/app/api/usage/[connectionId]/route.js";
+import { refreshAndUpdateCredentials } from "@/shared/services/tokenRefresh";
 import { CLAUDE_AUTOPING_CONFIG } from "@/shared/constants/config";
+import { register, start } from "@/shared/services/usageScheduler";
 
 const C = CLAUDE_AUTOPING_CONFIG;
 const PING_URL = "https://api.anthropic.com/v1/messages?beta=true";
 
-const g = (global.__claudeAutoPing ??= { interval: null, running: false, resetCache: {} });
+// Per-connection resetAt cache (avoids polling usage API on every tick)
+const resetCache = (global.__claudeAutoPingResetCache ??= {});
 
 function buildProxyOptions(cfg) {
   return {
@@ -24,7 +27,6 @@ function buildProxyOptions(cfg) {
   };
 }
 
-// Send minimal "hi" to start a fresh 5h window
 async function sendPing(accessToken, proxyOptions) {
   const res = await proxyAwareFetch(PING_URL, {
     method: "POST",
@@ -44,13 +46,12 @@ async function sendPing(accessToken, proxyOptions) {
 
 async function pingConnection(conn) {
   // Cached resetAt is stable for the whole 5h window; skip usage poll until near reset
-  const cachedReset = g.resetCache[conn.id];
+  const cachedReset = resetCache[conn.id];
   if (cachedReset && Date.now() < new Date(cachedReset).getTime() - C.refreshAheadMs) return;
 
   const proxyCfg = await resolveConnectionProxyConfig(conn.providerSpecificData);
   const proxyOptions = buildProxyOptions(proxyCfg);
 
-  // Refresh token if needed, then read 5h reset time
   let connection = conn;
   try {
     const r = await refreshAndUpdateCredentials(connection, false, proxyOptions);
@@ -64,13 +65,11 @@ async function pingConnection(conn) {
   const resetAt = usage?.quotas?.[C.fiveHourKey]?.resetAt;
   if (!resetAt) return;
 
-  // Cache resetAt to gate future ticks
-  g.resetCache[conn.id] = resetAt;
+  resetCache[conn.id] = resetAt;
 
   const resetMs = new Date(resetAt).getTime();
   const now = Date.now();
 
-  // Only ping once per reset cycle, right after window flips
   if (now < resetMs - C.pingLeadMs) return;
   if (connection.lastPingedResetAt === resetAt) return;
 
@@ -83,35 +82,29 @@ async function pingConnection(conn) {
   console.log(`[AutoPing] ${connection.id}: ping ${ok ? "sent" : "failed"} (reset ${resetAt})`);
 }
 
-async function tick() {
-  if (g.running) return;
-  g.running = true;
-  try {
-    const settings = await getSettings();
-    const enabledMap = settings[C.settingsKey]?.connections || {};
-    if (Object.keys(enabledMap).length === 0) return;
+async function claudePingTick() {
+  const settings = await getSettings();
+  const enabledMap = settings[C.settingsKey]?.connections || {};
+  if (Object.keys(enabledMap).length === 0) return;
 
-    const conns = await getProviderConnections({ provider: "claude", isActive: true });
-    // Only ping connections the user explicitly enabled
-    const targets = conns.filter((c) => c.authType === "oauth" && enabledMap[c.id] === true);
-    if (targets.length === 0) return;
+  const conns = await getProviderConnections({ provider: "claude", isActive: true });
+  const targets = conns.filter((c) => c.authType === "oauth" && enabledMap[c.id] === true);
+  if (targets.length === 0) return;
 
-    for (const conn of targets) {
-      try {
-        await pingConnection(conn);
-      } catch (e) {
-        console.warn(`[AutoPing] ${conn.id}: ${e.message}`);
-      }
+  for (const conn of targets) {
+    try {
+      await pingConnection(conn);
+    } catch (e) {
+      console.warn(`[AutoPing] ${conn.id}: ${e.message}`);
     }
-  } catch (e) {
-    console.warn("[AutoPing] tick error:", e.message);
-  } finally {
-    g.running = false;
   }
 }
 
+/**
+ * Register and start the Claude auto-ping scheduler.
+ * Idempotent — safe to call multiple times (UsageScheduler guards against duplicates).
+ */
 export function startClaudeAutoPing() {
-  if (g.interval) return;
-  g.interval = setInterval(() => { tick().catch(() => {}); }, C.tickIntervalMs);
-  if (g.interval.unref) g.interval.unref();
+  register("claude-ping", { tickFn: claudePingTick, intervalMs: C.tickIntervalMs });
+  start();
 }

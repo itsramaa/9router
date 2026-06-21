@@ -42,8 +42,8 @@ export async function DELETE(request) {
   try { body = await request.json(); } catch { body = {}; }
 
   if (body.all) {
-    await deleteAllAutomationAccounts();
-    return Response.json({ ok: true });
+    const result = await deleteAllAutomationAccounts();
+    return Response.json({ ok: true, deleted: result.deleted, backupPath: result.backupPath });
   }
 
   if (body.id) {

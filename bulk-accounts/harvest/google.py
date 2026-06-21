@@ -206,12 +206,28 @@ async def handle_google_flow(page: Any, email: str, password: str, timeout: floa
     """Combined Google Login & Consent flow helper."""
     deadline = time.monotonic() + timeout
     last_step = ""
+    last_url = ""
+    stuck_count = 0
     speedbump_sels = _S["google_login"]["SPEEDBUMP_BTNS"]
 
     while time.monotonic() < deadline:
         try:
             url = page.url
         except Exception: return False
+
+        # Track if we're stuck on the same page
+        if url == last_url:
+            stuck_count += 1
+            if stuck_count == 30:  # 30s on same page
+                emit({"type": "progress", "provider": "google", "step": "stuck_warn",
+                      "message": f"Google flow stuck 30s on: {url[:120]}"})
+            if stuck_count >= 60:  # 60s — give up with diagnostic
+                emit({"type": "error", "provider": "google",
+                      "message": f"Google login stuck 60s on: {url[:120]} — aborting"})
+                return False
+        else:
+            stuck_count = 0
+            last_url = url
 
         if not any(d in url for d in _GOOGLE_DOMAINS) and url.startswith("http"):
             return True
@@ -242,11 +258,15 @@ async def handle_google_flow(page: Any, email: str, password: str, timeout: floa
             await asyncio.sleep(3); continue
 
         if any(p in url for p in ["/challenge/", "/signin/rejected", "/signin/blocked"]):
+            emit({"type": "progress", "provider": "google", "step": "challenge",
+                  "message": f"Google challenge/block detected: {url[:80]}"})
             await asyncio.sleep(2)
             try: await page.go_back(); await asyncio.sleep(2)
             except Exception: pass
             continue
         await asyncio.sleep(1)
+    emit({"type": "error", "provider": "google",
+          "message": f"Google login timed out after {timeout}s — last URL: {last_url[:120]}"})
     return False
 
 async def retry_google_login(page: Any, email: str, password: str, login_url: str, google_btn_selectors: list[str], max_retries: int = 2, timeout: float = 90.0) -> bool:
