@@ -36,6 +36,9 @@ import atexit
 import logging
 
 
+import logging.handlers
+
+
 import os
 
 
@@ -91,7 +94,6 @@ class _NullWriter:
 
 
 def build_parser() -> argparse.ArgumentParser:
-
     p = argparse.ArgumentParser(
         prog="run.py",
         description="Bulk API Key Harvester",
@@ -187,7 +189,6 @@ async def run_harvest(
     slot_queue: asyncio.Queue[int] = asyncio.Queue()
 
     for i in range(concurrent):
-
         slot_queue.put_nowait(i + 1)
 
     semaphore = asyncio.Semaphore(concurrent)
@@ -195,15 +196,12 @@ async def run_harvest(
     all_results: list[dict] = []
 
     async def run_one(account: dict) -> dict:
-
         async with semaphore:
-
             await asyncio.sleep(random.uniform(0.5, 2.0))
 
             slot = await slot_queue.get()
 
             try:
-
                 proxy = await proxy_mgr.get_next_proxy()
 
                 worker = HarvestWorker(
@@ -218,9 +216,7 @@ async def run_harvest(
                 result = await worker.run()
 
                 try:
-
                     async with cp_mgr.lock:
-
                         cp_mgr.data["completed"][account["email"]] = {
                             "api_keys": result.get("api_keys", {}),
                             "errors": result.get("errors", {}),
@@ -236,15 +232,11 @@ async def run_harvest(
                         await cp_mgr.save()
 
                 except Exception as _e:
-
                     logging.warning(f"Checkpoint save error: {_e}")
 
                 return result
 
             finally:
-
-                cleanup_camoufox_temp()
-
                 slot_queue.put_nowait(slot)
 
     tasks = [asyncio.create_task(run_one(acc)) for acc in accounts]
@@ -252,15 +244,12 @@ async def run_harvest(
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for r in results:
-
         if isinstance(r, Exception):
-
             all_results.append(
                 {"email": "unknown", "api_keys": {}, "errors": {"_exception": str(r)}}
             )
 
         else:
-
             all_results.append(r)
 
     return all_results
@@ -287,43 +276,33 @@ async def read_stdin_commands() -> None:
     from core.interact import InteractMode
 
     def _dispatch_line(line: str) -> None:
-
         parts = line.strip().split(" ", 2)
 
         if len(parts) >= 3 and parts[0] == "interact":
-
             try:
-
                 InteractMode.queue_action(int(parts[1]), parts[2])
 
             except (ValueError, Exception) as e:
-
                 print(f"[stdin] Bad interact line: {line!r} — {e}", flush=True)
 
     if sys.platform == "win32":
-
         # Windows: connect_read_pipe unreliable for piped stdin — use thread executor
 
         loop = asyncio.get_event_loop()
 
         try:
-
             while True:
-
                 line = await loop.run_in_executor(None, sys.stdin.readline)
 
                 if not line:
-
                     break
 
                 _dispatch_line(line)
 
         except Exception as e:
-
             print(f"[stdin] Windows stdin reader stopped: {e}", flush=True)
 
     else:
-
         # Unix/macOS: use asyncio native pipe reader
 
         loop = asyncio.get_event_loop()
@@ -333,34 +312,27 @@ async def read_stdin_commands() -> None:
         protocol = asyncio.StreamReaderProtocol(reader)
 
         try:
-
             await loop.connect_read_pipe(lambda: protocol, sys.stdin.buffer)
 
         except Exception as e:
-
             print(f"[stdin] Could not attach stdin reader: {e}", flush=True)
 
             return
 
         while True:
-
             try:
-
                 line_bytes = await reader.readline()
 
             except Exception:
-
                 break
 
             if not line_bytes:
-
                 break
 
             _dispatch_line(line_bytes.decode("utf-8", errors="replace"))
 
 
 async def main(args: argparse.Namespace) -> None:
-
     # ── Lock file: stale-PID aware ────────────────────────────────────────────
 
     lock_file = Path(__file__).parent / "daemon.lock"
@@ -371,17 +343,14 @@ async def main(args: argparse.Namespace) -> None:
         """Return True if the pid in the file is no longer running."""
 
         try:
-
             old_pid = int(pid_file.read_text().strip())
 
             if os.name == "nt":
-
                 import ctypes, ctypes.wintypes
 
                 handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, old_pid)
 
                 if not handle:
-
                     return True
 
                 code = ctypes.wintypes.DWORD()
@@ -393,17 +362,14 @@ async def main(args: argparse.Namespace) -> None:
                 return code.value != 259  # 259 = STILL_ACTIVE
 
             else:
-
                 os.kill(old_pid, 0)
 
                 return False
 
         except (ValueError, OSError):
-
             return True
 
     try:
-
         _o_flags = (
             os.O_CREAT
             | os.O_EXCL
@@ -418,37 +384,38 @@ async def main(args: argparse.Namespace) -> None:
         os.close(fd)
 
     except FileExistsError:
-
         if _check_stale_pid(lock_file):
-
             print(f"  ? Removing stale lock file (pid no longer running).", flush=True)
 
             try:
-
                 lock_file.unlink()
 
             except Exception:
-
                 pass
 
             # Retry atomic creation after stale removal
 
             try:
-
                 fd = os.open(str(lock_file), _o_flags)
 
                 os.write(fd, str(os.getpid()).encode())
 
                 os.close(fd)
 
-            except Exception as e:
+            except FileExistsError:
+                print(
+                    f"  ? Another instance grabbed lock after stale removal.",
+                    flush=True,
+                )
 
+                sys.exit(1)
+
+            except Exception as e:
                 print(f"  ? Could not create lock file: {e}", flush=True)
 
                 sys.exit(1)
 
         else:
-
             print(
                 f"  ? Lock file found: {lock_file}. Another instance running?",
                 flush=True,
@@ -457,21 +424,16 @@ async def main(args: argparse.Namespace) -> None:
             sys.exit(1)
 
     except Exception as e:
-
         print(f"  ? Could not create lock file: {e}", flush=True)
 
         sys.exit(1)
 
     def _remove_lock():
-
         try:
-
             if lock_file.exists():
-
                 lock_file.unlink()
 
         except Exception:
-
             pass
 
     atexit.register(_remove_lock)
@@ -482,20 +444,54 @@ async def main(args: argparse.Namespace) -> None:
 
     Config.INTERACTIVE_MODE = interactive
 
-    sys.stderr = _NullWriter()
+    # Setup stderr logging to file instead of discarding
+    # This captures errors for debugging while keeping console clean
+    log_dir = Path(__file__).parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / f"harvest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
-    logging.getLogger().setLevel(logging.ERROR)
+    try:
+        # AUDIT-013: Configure rotating file handler for stderr
+        # 10MB per file, keep 5 backups to prevent disk exhaustion
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=10 * 1024 * 1024,  # 10MB
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        )
+
+        # Add file handler to root logger
+        root_logger = logging.getLogger()
+        root_logger.addHandler(file_handler)
+        root_logger.setLevel(logging.DEBUG)
+
+        # Redirect stderr to logger
+        class StderrToLogger:
+            def write(self, message):
+                if message.strip():  # Only log non-empty messages
+                    logging.error(message.rstrip())
+
+            def flush(self):
+                pass
+
+        sys.stderr = StderrToLogger()
+    except Exception as e:
+        # Fallback to null writer if logging setup fails
+        print(f"Warning: Failed to setup file logging: {e}", file=sys.__stderr__)
+        sys.stderr = _NullWriter()
 
     providers = validate_providers(args.providers)
 
     if not providers:
-
         sys.exit(1)
 
     accounts = load_accounts(args)
 
     if not accounts:
-
         print("  ✗ No accounts loaded.", flush=True)
 
         sys.exit(1)
@@ -514,17 +510,14 @@ async def main(args: argparse.Namespace) -> None:
     # ── Simulation mode ───────────────────────────────────────────────────────
 
     if args.simulate:
-
         from core.simulate import run_simulated_harvest
 
         await run_simulated_harvest(accounts, providers, args.concurrent, output_dir)
 
         try:
-
             lock_file.unlink()
 
         except Exception:
-
             pass
 
         return
@@ -546,13 +539,11 @@ async def main(args: argparse.Namespace) -> None:
     cp_mgr = CheckpointManager(output_dir)
 
     if args.resume:
-
         cp = cp_mgr.load()
 
         completed = set(cp.get("completed", {}).keys())
 
         if completed:
-
             before = len(accounts)
 
             accounts = [a for a in accounts if a["email"] not in completed]
@@ -565,39 +556,31 @@ async def main(args: argparse.Namespace) -> None:
             )
 
     else:
-
         cp_mgr.remove()
 
     # ── Start stdin reader alongside harvest when interactive ─────────────────
 
     if interactive:
-
         stdin_task = asyncio.create_task(read_stdin_commands())
 
     else:
-
         stdin_task = None
 
     # ── Harvest ───────────────────────────────────────────────────────────────
 
     try:
-
         all_results = await run_harvest(
             accounts, providers, args.concurrent, proxy_mgr, args.timeout, cp_mgr
         )
 
     finally:
-
         if stdin_task and not stdin_task.done():
-
             stdin_task.cancel()
 
             try:
-
                 await stdin_task
 
             except (asyncio.CancelledError, Exception):
-
                 pass
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -620,41 +603,32 @@ async def main(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-
     parser = build_parser()
 
     args = parser.parse_args()
 
     if not args.email and not args.file and not Path(args.accounts).exists():
-
         default = Path(__file__).parent / "accounts.json"
 
         if default.exists():
-
             args.accounts = str(default)
 
         else:
-
             parser.error("No accounts specified.")
 
     if args.email and not args.password:
-
         parser.error("--email requires --password")
 
     if args.password and not args.email:
-
         parser.error("--password requires --email")
 
     # Windows: set ProactorEventLoop so asyncio.create_subprocess_exec works
 
     if sys.platform == "win32":
-
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
     try:
-
         asyncio.run(main(args))
 
     except KeyboardInterrupt:
-
         print("\nStopped.", flush=True)

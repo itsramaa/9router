@@ -38,6 +38,10 @@ class FrameStreamer:
                 await self._task
             except asyncio.CancelledError:
                 pass
+            # AUDIT-015: Clear task reference to prevent leak
+            self._task = None
+        # AUDIT-015: Clear page reference to prevent holding closed pages
+        self.page = None
 
     async def _capture(self) -> bytes | None:
         """Capture full viewport as JPEG with timeout to prevent event loop starvation."""

@@ -89,6 +89,8 @@ def clear_interact_context(slot: int = 0) -> None:
     _current_streamer.set(None)
     _current_emit.set(None)
     _current_email.set("")
+    # AUDIT-014: Clean up InteractMode queues to prevent leaks
+    InteractMode.cleanup(slot)
 
 
 async def interact_gate(
