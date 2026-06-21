@@ -1,0 +1,45 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+ENV/
+env/
+.env
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific
+accounts.json
+accounts.txt
+*.lock
+*.pid
+daemon.lock
+server.pid
+outputs/
+backups/
+dashboard/node_modules/
+dashboard/dist/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+temp-*.json
+temp-*.txt

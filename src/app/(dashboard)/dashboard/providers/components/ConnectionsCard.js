@@ -46,6 +46,7 @@ const BAN_KEYWORDS_CARD = [
   'terminated',
   'blocked',
   'revoked',
+  'disabled', // BUG-14 fix: added to match connectionStatus.js + connectionBanDetect.js
 ];
 // â”€â”€ ConnectionRow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function ConnectionRow({

@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import logging.handlers
+# pyrefly: ignore [missing-import]
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, AsyncMock, patch

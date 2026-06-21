@@ -20,9 +20,10 @@ from .base import (
     emit_error,
     handle_oauth_popup,
     handle_captcha,
+    check_already_connected,
+    verify_connection_in_dashboard,
 )
 from .google_session import ensure_google_session
-from .dashboard import email_in_connection_list
 from .utils import click_first_visible, safe_goto
 
 _S = SELECTORS["kilocode"]
@@ -33,8 +34,9 @@ async def harvest(
 ) -> str:
     emit_progress(provider, "navigate", "Starting Kilo Code Connection...")
     try:
-        if await email_in_connection_list(email, provider="kilocode"):
-            return f"Kilo Code : Already connected ({email})"
+        # Check if already connected
+        if await check_already_connected(email, provider, "Kilo Code"):
+            return ""
 
         emit_progress(provider, "google", "Ensuring Google session...")
         await ensure_google_session(page, email, password)
@@ -48,7 +50,7 @@ async def harvest(
         await asyncio.sleep(2)
 
         # Step 1: OAuth popup → Google login only (keep popup open, no skip/auth yet)
-        res = await handle_oauth_popup(
+        ok, extra_page = await handle_oauth_popup(
             page,
             email,
             password,
@@ -56,11 +58,8 @@ async def harvest(
             post_auth_delay=5,
             dont_close=True,
         )
-        if not res:
+        if not ok:
             return ""
-
-        # Get the popup page reference
-        _, extra_page = res if isinstance(res, tuple) else (True, page)
 
         # Step 2: CAPTCHA inside popup → auto-solve or manual via UI
         emit_progress(provider, "captcha", "Waiting for user to solve CAPTCHA...")
@@ -94,11 +93,8 @@ async def harvest(
         await safe_goto(page, url)
         await asyncio.sleep(3)
 
-        for _ in range(6):
-            if await email_in_connection_list(email, provider="kilocode"):
-                return f"Kilo Code : Success"
-            await asyncio.sleep(3)
-        return ""
+        await verify_connection_in_dashboard(page, email, provider)
+        return ""  # Success for log_only provider
     except Exception as e:
         emit_error(provider, e)
         return ""

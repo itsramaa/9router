@@ -1,48 +1,57 @@
 #!/usr/bin/env python3
 
+
 """
+
+
 
 server.py — Dashboard WebSocket + HTTP server
 
+
+
 ==============================================
+
+
 
 """
 
 from __future__ import annotations
 
 
-
 import argparse
+
 
 import logging
 
+
 import os
 
+
 import sys
+
 
 from pathlib import Path
 
 
-
 from core.config import Config
 
-
-
 # WSLg / X11 display fix — only on Linux (not needed on Windows/macOS)
+
 
 if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
 
     os.environ["DISPLAY"] = ":0"
+
 
 if sys.platform.startswith("linux") and not os.environ.get("WAYLAND_DISPLAY"):
 
     os.environ["WAYLAND_DISPLAY"] = "wayland-0"
 
 
-
 try:
 
     import aiohttp
+
 
 except ImportError:
 
@@ -54,7 +63,11 @@ except ImportError:
 
     if _run_py.exists():
 
-        subprocess.run([sys.executable, str(_run_py), "--help"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            [sys.executable, str(_run_py), "--help"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     try:
 
@@ -62,24 +75,24 @@ except ImportError:
 
     except ImportError:
 
-        print("[server] Fatal: Could not install dependencies. Please run: pip install -r requirements-harvest.txt", file=sys.stderr)
+        print(
+            "[server] Fatal: Could not install dependencies. Please run: pip install -r requirements-harvest.txt",
+            file=sys.stderr,
+        )
 
         sys.exit(1)
-
 
 
 from aiohttp import web
 
 
-
 from srv.handlers import ServerHandlers
+
 
 from srv.state import ServerState
 
+
 from srv.ws import WebSocketManager
-
-
-
 
 
 def create_app() -> web.Application:
@@ -90,37 +103,39 @@ def create_app() -> web.Application:
 
     handlers = ServerHandlers(state, ws_mgr)
 
-
-
     app = web.Application()
 
-    app.router.add_get("/",                handlers.handle_index)
+    app.router.add_get("/", handlers.handle_index)
 
-    app.router.add_get("/api/accounts",    handlers.handle_accounts)
+    app.router.add_get("/api/accounts", handlers.handle_accounts)
 
     app.router.add_post("/api/save_accounts", handlers.handle_save_accounts)
 
-    app.router.add_get("/api/results",     handlers.handle_results)
+    app.router.add_get("/api/results", handlers.handle_results)
 
-    app.router.add_post("/api/start",      handlers.handle_start)
+    app.router.add_post("/api/start", handlers.handle_start)
 
-    app.router.add_post("/api/simulate",   handlers.handle_simulate)
+    app.router.add_post("/api/simulate", handlers.handle_simulate)
 
-    app.router.add_post("/api/stop",       handlers.handle_stop)
+    app.router.add_post("/api/stop", handlers.handle_stop)
 
-    app.router.add_post("/api/interact",   handlers.handle_interact)
+    app.router.add_post("/api/interact", handlers.handle_interact)
 
-    app.router.add_get("/api/progress",    handlers.handle_progress)
+    app.router.add_get("/api/progress", handlers.handle_progress)
 
-    app.router.add_post("/api/reset",          handlers.handle_reset)
+    app.router.add_post("/api/reset", handlers.handle_reset)
 
-    app.router.add_get("/api/backups",         handlers.handle_list_backups)
+    app.router.add_get("/api/backups", handlers.handle_list_backups)
 
     app.router.add_post("/api/backups/import", handlers.handle_restore_backup)
 
-    app.router.add_get("/ws",              ws_mgr.handle_ws)
+    app.router.add_post("/api/retry", handlers.handle_retry_slot)
 
+    app.router.add_post("/api/bulk-delete", handlers.handle_bulk_delete)
 
+    app.router.add_post("/api/bulk-harvest", handlers.handle_bulk_harvest)
+
+    app.router.add_get("/ws", ws_mgr.handle_ws)
 
     dist_dir = Path(__file__).parent / "dashboard" / "dist"
 
@@ -132,12 +147,7 @@ def create_app() -> web.Application:
 
             app.router.add_static("/assets", assets_dir)
 
-
-
     return app
-
-
-
 
 
 if __name__ == "__main__":
@@ -150,9 +160,9 @@ if __name__ == "__main__":
 
         except Exception as _e:
 
-            logging.warning(f'Server swallowed exception during stdout reconfigure: {_e}')
-
-
+            logging.warning(
+                f"Server swallowed exception during stdout reconfigure: {_e}"
+            )
 
     # Derive port from Config
 
@@ -164,19 +174,19 @@ if __name__ == "__main__":
 
         default_port = 20128
 
-
-
     p = argparse.ArgumentParser()
 
     p.add_argument("--port", type=int, default=default_port)
 
-    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--host", default="127.0.0.1")
 
-    p.add_argument("--dev", action="store_true", help="Auto-rebuild frontend on changes (runs npm run build --watch)")
+    p.add_argument(
+        "--dev",
+        action="store_true",
+        help="Auto-rebuild frontend on changes (runs npm run build --watch)",
+    )
 
     args = p.parse_args()
-
-
 
     if args.dev:
 
@@ -185,24 +195,24 @@ if __name__ == "__main__":
         npm_dir = Path(__file__).parent / "dashboard"
 
         _build_watch = subprocess.Popen(
-
-            ["npx.cmd" if sys.platform == "win32" else "npx", "vite", "build", "--watch"],
-
+            [
+                "npx.cmd" if sys.platform == "win32" else "npx",
+                "vite",
+                "build",
+                "--watch",
+            ],
             cwd=str(npm_dir),
-
             stdout=subprocess.DEVNULL,
-
             stderr=subprocess.DEVNULL,
-
         )
 
         import atexit
 
-        atexit.register(lambda: _build_watch.terminate() if _build_watch.poll() is None else None)
+        atexit.register(
+            lambda: _build_watch.terminate() if _build_watch.poll() is None else None
+        )
 
         print(f"[server] Dev mode: watching dashboard/src/ for changes...", flush=True)
-
-
 
     print(f"[server] Dashboard  -> http://{args.host}:{args.port}", flush=True)
 
@@ -211,8 +221,11 @@ if __name__ == "__main__":
     print(f"[server] Press Ctrl+C to stop", flush=True)
 
     # Windows: ensure ProactorEventLoop for asyncio subprocess support
-    if sys.platform == "win32":
-        import asyncio
-        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    web.run_app(create_app(), host=args.host, port=args.port, print=None)
 
+    if sys.platform == "win32":
+
+        import asyncio
+
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+    web.run_app(create_app(), host=args.host, port=args.port, print=None)

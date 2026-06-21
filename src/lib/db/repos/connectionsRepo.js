@@ -6,7 +6,7 @@ const OPTIONAL_FIELDS = [
   "displayName", "email", "globalPriority", "defaultModel",
   "accessToken", "refreshToken", "expiresAt", "tokenType",
   "scope", "projectId", "apiKey", "testStatus",
-  "lastTested", "lastError", "lastErrorAt", "rateLimitedUntil", "expiresIn", "errorCode",
+  "lastTested", "lastError", "lastErrorAt", "expiresIn", "errorCode",
   "consecutiveUseCount", "idToken", "lastRefreshAt",
 ];
 
@@ -200,7 +200,7 @@ export async function cleanupProviderConnections() {
     "displayName", "email", "globalPriority", "defaultModel",
     "accessToken", "refreshToken", "expiresAt", "tokenType",
     "scope", "projectId", "apiKey", "testStatus",
-    "lastTested", "lastError", "lastErrorAt", "rateLimitedUntil", "expiresIn",
+    "lastTested", "lastError", "lastErrorAt", "expiresIn",
     "consecutiveUseCount",
   ];
   let cleaned = 0;

@@ -1,4 +1,8 @@
-import { extractApiKey, isValidApiKey } from '../services/auth.js';
+import {
+  extractApiKey,
+  isValidApiKey,
+  clearAccountError,
+} from '../services/auth.js';
 
 import { getSettings } from '@/lib/localDb';
 
@@ -37,6 +41,7 @@ export async function handleStt(request) {
   } catch {
     return errorResponse(
       HTTP_STATUS.BAD_REQUEST,
+
       'Invalid multipart form data'
     );
   }
@@ -64,6 +69,7 @@ export async function handleStt(request) {
   if (!formData.get('file'))
     return errorResponse(
       HTTP_STATUS.BAD_REQUEST,
+
       'Missing required field: file'
     );
 
@@ -81,8 +87,11 @@ export async function handleStt(request) {
   if (!CREDENTIALED_PROVIDERS.has(provider)) {
     const result = await handleSttCore({
       provider,
+
       model,
+
       formData,
+
       sttConfig: AI_PROVIDERS[provider]?.sttConfig,
     });
 
@@ -90,6 +99,7 @@ export async function handleStt(request) {
 
     return errorResponse(
       result.status || HTTP_STATUS.BAD_GATEWAY,
+
       result.error || 'STT failed'
     );
   }
@@ -102,12 +112,20 @@ export async function handleStt(request) {
     execute: async (credentials) =>
       handleSttCore({
         provider,
+
         model,
+
         formData,
+
         credentials,
+
         sttConfig: AI_PROVIDERS[provider]?.sttConfig,
       }),
 
-    onSuccess: async () => {},
+    // BUG-16 fix: clear error state on successful STT request
+
+    onSuccess: async (credentials) => {
+      await clearAccountError(credentials.connectionId, credentials);
+    },
   });
 }

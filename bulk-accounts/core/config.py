@@ -91,6 +91,6 @@ class Config:
     }
 
     DASHBOARD_BASE_URL = _os.environ.get("DASHBOARD_BASE_URL", "http://localhost:20128")
-    INTERACTIVE_MODE = False  # Always False — web UI drives interaction via WS
+    INTERACTIVE_MODE = True  # Web UI drives interaction via WS — must be True for manual flows
     ALL_PROVIDERS = list(PROVIDER_REGISTRY.keys())
     PROVIDER_DISPLAY = {k: v["display"] for k, v in PROVIDER_REGISTRY.items()}

@@ -30,6 +30,14 @@ from core.validation import validate_proxy_url
 
 MAX_RESULT_CONTENT_BYTES = 512 * 1024  # BUG-025: cap result file reads at 512KB
 
+# BUG-13: On Windows, spawn harvest subprocesses in a new process group so that
+# killing server.py also terminates all child camoufox/run.py processes.
+_WIN_PGROUP = (
+    {"creationflags": 0x00000200}  # CREATE_NEW_PROCESS_GROUP
+    if sys.platform == "win32"
+    else {}
+)
+
 
 class ServerHandlers:
     def __init__(self, state: ServerState, ws_mgr: WebSocketManager):
@@ -307,6 +315,7 @@ class ServerHandlers:
             env=env,
             cwd=str(self.base_dir),
             limit=4 * 1024 * 1024,
+            **_WIN_PGROUP,
         )
 
         self.state.proc_stdin = self.state.proc.stdin
@@ -620,6 +629,7 @@ class ServerHandlers:
             stderr=asyncio.subprocess.STDOUT,
             env=env,
             cwd=str(self.base_dir),
+            **_WIN_PGROUP,
         )
 
         self.state.proc_stdin = self.state.proc.stdin
@@ -823,6 +833,7 @@ class ServerHandlers:
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
                 cwd=str(self.base_dir),
+                **_WIN_PGROUP,
             )
 
             # AUDIT-001 fix: Track this retry process under lock
@@ -1065,6 +1076,7 @@ class ServerHandlers:
             stderr=asyncio.subprocess.STDOUT,
             env=env,
             cwd=str(self.base_dir),
+            **_WIN_PGROUP,
         )
 
         self.state.proc_stdin = self.state.proc.stdin

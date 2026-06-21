@@ -7,9 +7,9 @@ import asyncio
 import logging
 from typing import Any
 from core.selectors import SELECTORS
-from .base import emit_progress, emit_error, interact_mode, handle_oauth_popup, handle_captcha
+from .base import emit_progress, emit_error, interact_mode, handle_oauth_popup, handle_captcha, check_already_connected
 from .google_session import ensure_google_session
-from .dashboard import validate_and_save_to_dashboard, email_in_connection_list
+from .dashboard import validate_and_save_to_dashboard
 from .utils import (
     click_first_visible,
     fill_first_visible,
@@ -25,9 +25,8 @@ URL_KEYS = _S["URL_KEYS"]
 async def harvest(page: Any, email: str, password: str, provider: str = "openrouter") -> str:
     emit_progress(provider, "navigate", "Navigating to OpenRouter...")
     try:
-        # Skip if already connected
-        if await email_in_connection_list(email, provider=provider):
-            emit_progress(provider, "skip", f"⏭ Already connected ({email})")
+        # Check if already connected
+        if await check_already_connected(email, provider, "OpenRouter"):
             return ""
         
         # Ensure Google session before triggering Clerk OAuth popup
@@ -39,8 +38,10 @@ async def harvest(page: Any, email: str, password: str, provider: str = "openrou
         await asyncio.sleep(3)
 
         # Step 1: Pure OAuth (no captcha)
-        ok = await handle_oauth_popup(
+        ok, _ = await handle_oauth_popup(
             page, email, password,
+            google_btn_sels=_S["CLERK_GOOGLE_BTNS"],
+            post_auth_delay=5,
         )
         if not ok:
             return ""

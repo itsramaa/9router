@@ -77,6 +77,60 @@ async def handle_captcha(
     return False
 
 
+async def verify_connection_in_dashboard(
+    page: Any, email: str, provider: str, max_retries: int = 6, delay: float = 3.0
+) -> bool:
+    """
+    Verify that a connection was successfully created in the 9router dashboard.
+    
+    Used by log_only providers (qoder, kilocode, xai) after OAuth completion
+    to confirm the connection appears in the dashboard.
+    
+    Args:
+        page: Browser page
+        email: User email to check
+        provider: Provider name
+        max_retries: Number of verification attempts
+        delay: Seconds to wait between attempts
+    
+    Returns:
+        True if connection verified, False otherwise
+    """
+    from .dashboard import email_in_connection_list
+    
+    for attempt in range(max_retries):
+        if await email_in_connection_list(email, provider=provider):
+            emit_progress(provider, "success", f"{provider.title()} connected for {email}")
+            return True
+        await asyncio.sleep(delay)
+    
+    emit_progress(provider, "warning", f"Connection not verified in dashboard after {max_retries} attempts")
+    return False
+
+
+async def check_already_connected(
+    email: str, provider: str, display_name: str | None = None
+) -> bool:
+    """
+    Check if a connection already exists in the dashboard.
+    
+    Args:
+        email: User email
+        provider: Provider name
+        display_name: Optional display name for the message
+    
+    Returns:
+        True if already connected (caller should return early), False otherwise
+    """
+    from .dashboard import email_in_connection_list
+    
+    if await email_in_connection_list(email, provider=provider):
+        name = display_name or provider.title()
+        emit_progress(provider, "skip", f"⏭ Already connected ({email})")
+        return True
+    return False
+
+
 async def handle_oauth_popup(
     page: Any, email: str, password: str, *,
     google_btn_sels: list | None = None,
@@ -86,7 +140,7 @@ async def handle_oauth_popup(
     post_auth_delay: int = 3,
     timeout: int = 15000,
     **kwargs
-) -> bool | tuple[bool, Any]:
+) -> tuple[bool, Any]:
     """
     Pure OAuth popup handler — handles Google login only, NO captcha.
 
@@ -139,14 +193,25 @@ async def handle_oauth_popup(
     # 3. Handle Google login flow
     if any(d in extra_page.url for d in _GOOGLE_DOMAINS):
         await asyncio.sleep(3)
+        google_ok = False
         for _ in range(5):
             if await handle_google_account_chooser(extra_page, email):
-                await asyncio.sleep(3); break
-            if await is_google_consent_screen(extra_page): break
+                await asyncio.sleep(3); google_ok = True; break
+            if await is_google_consent_screen(extra_page): google_ok = True; break
             await asyncio.sleep(3)
         if await is_google_consent_screen(extra_page):
             await handle_google_consent(extra_page)
+            google_ok = True
         await asyncio.sleep(post_auth_delay)
+        # Check if we're still stuck on Google login — fail fast
+        if not google_ok and any(d in extra_page.url for d in _GOOGLE_DOMAINS):
+            from core.emit import Emit
+            Emit.error("oauth", f"Google login failed — still on {extra_page.url[:120]}")
+            if is_popup and extra_page is not page:
+                try:
+                    if not extra_page.is_closed(): await extra_page.close()
+                except Exception: pass
+            return (False, extra_page)
 
     # 4. Click skip/authorize buttons (e.g. SKIP_BTN, AUTH_BTN inside popup)
     if skip_sels:

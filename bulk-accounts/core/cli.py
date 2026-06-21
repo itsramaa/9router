@@ -40,6 +40,8 @@ def validate_providers(providers_str: str) -> list[str]:
     providers = [p.strip().lower() for p in providers_str.split(",") if p.strip()]
     invalid = [p for p in providers if p not in Config.PROVIDER_REGISTRY]
     if invalid:
-        print(f"  ✗ Unknown providers: {invalid}. Valid: {Config.ALL_PROVIDERS}", flush=True)
-        return []
-    return providers
+        print(f"  ⚠ Unknown providers (skipped): {invalid}. Valid: {Config.ALL_PROVIDERS}", flush=True)
+    valid = [p for p in providers if p in Config.PROVIDER_REGISTRY]
+    if not valid:
+        print(f"  ✗ No valid providers specified.", flush=True)
+    return valid

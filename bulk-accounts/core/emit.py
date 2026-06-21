@@ -23,18 +23,16 @@ class Emit:
     _callback: Any = None
 
     @classmethod
+    def _ensure_lock(cls) -> asyncio.Lock:
+        """Ensure lock exists — safe for single-threaded asyncio event loop."""
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
+        return cls._lock
+
+    @classmethod
     def set_callback(cls, cb: Any) -> None:
 
         cls._callback = cb
-
-    @classmethod
-    def _get_lock(cls) -> asyncio.Lock:
-
-        if cls._lock is None:
-
-            cls._lock = asyncio.Lock()
-
-        return cls._lock
 
     @classmethod
     async def async_call(cls, data: dict) -> None:
@@ -49,7 +47,7 @@ class Emit:
 
             line = json.dumps(data, ensure_ascii=False) + "\n"
 
-            async with cls._get_lock():
+            async with cls._ensure_lock():
 
                 sys.stdout.write(line)
 

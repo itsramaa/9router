@@ -29,7 +29,39 @@ class CheckpointManager:
                 logging.warning(f'Swallowed exception: {_e}')
         return self.data
 
+    def _deduplicate_keys(self) -> None:
+        """Remove duplicate API keys from checkpoint data.
+        
+        Deduplication is based on provider + email + key_hash to prevent
+        storing the same key multiple times when accounts are re-harvested.
+        """
+        if "completed" not in self.data:
+            return
+            
+        seen_keys = set()
+        deduplicated = {}
+        
+        for email, account_data in self.data["completed"].items():
+            if "api_keys" not in account_data:
+                deduplicated[email] = account_data
+                continue
+                
+            unique_keys = {}
+            for provider, key in account_data["api_keys"].items():
+                # Create hash for deduplication: provider + email + first 20 chars of key
+                key_hash = f"{provider}:{email}:{key[:20] if key else ''}"
+                
+                if key_hash not in seen_keys and key:  # Only add if not seen and key is not empty
+                    seen_keys.add(key_hash)
+                    unique_keys[provider] = key
+                    
+            account_data["api_keys"] = unique_keys
+            deduplicated[email] = account_data
+            
+        self.data["completed"] = deduplicated
+
     async def save(self) -> None:
+        self._deduplicate_keys()  # Remove duplicate keys before saving
         path = self._path
         tmp = path.with_suffix(".tmp")
         

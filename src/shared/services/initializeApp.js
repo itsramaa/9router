@@ -1,101 +1,201 @@
-import os from "os";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
-import { existsSync } from "fs";
-import { cleanupProviderConnections, getSettings, updateSettings, getApiKeys } from "@/lib/localDb";
+import os from 'os';
+
+import { fileURLToPath } from 'url';
+
+import { dirname, join } from 'path';
+
+import { existsSync } from 'fs';
+
 import {
-  enableTunnel, enableTailscale,
-  getTunnelService, getTailscaleService, setTunnelUnexpectedExitCallback,
-  killCloudflared, isCloudflaredRunning, ensureCloudflared,
-  isTailscaleRunning, isTailscaleRunningStrict, isDaemonAlive, startFunnel,
+  cleanupProviderConnections,
+  getSettings,
+  updateSettings,
+  getApiKeys,
+  getProviderConnections,
+} from '@/lib/localDb';
+
+import {
+  enableTunnel,
+  enableTailscale,
+  getTunnelService,
+  getTailscaleService,
+  setTunnelUnexpectedExitCallback,
+  killCloudflared,
+  isCloudflaredRunning,
+  ensureCloudflared,
+  isTailscaleRunning,
+  isTailscaleRunningStrict,
+  isDaemonAlive,
+  startFunnel,
   checkInternet,
-  RESTART_COOLDOWN_MS, NETWORK_SETTLE_MS,
-  WATCHDOG_INTERVAL_MS, NETWORK_CHECK_INTERVAL_MS, VIRTUAL_IFACE_REGEX,
-} from "@/lib/tunnel";
-import { getMitmStatus, startMitm, loadEncryptedPassword, initDbHooks, restoreToolDNS, removeAllDNSEntriesSync } from "@/mitm/manager";
-import { startClaudeAutoPing } from "@/shared/services/claudeAutoPing";
-import { register, start } from "@/shared/services/usageScheduler";
-import { runQuotaMonitorTick, QUOTA_SUPPORTED_PROVIDERS } from "open-sse/services/quotaMonitor.js";
-import { resumeExpiredPauses } from "@/shared/services/accountLifecycle";
-import { syncToJson as syncMitmAliasCache } from "@/lib/mitmAliasCache";
+  RESTART_COOLDOWN_MS,
+  NETWORK_SETTLE_MS,
+  WATCHDOG_INTERVAL_MS,
+  NETWORK_CHECK_INTERVAL_MS,
+  VIRTUAL_IFACE_REGEX,
+} from '@/lib/tunnel';
+
+import {
+  getMitmStatus,
+  startMitm,
+  loadEncryptedPassword,
+  initDbHooks,
+  restoreToolDNS,
+  removeAllDNSEntriesSync,
+} from '@/mitm/manager';
+
+import { startClaudeAutoPing } from '@/shared/services/claudeAutoPing';
+
+import { register, start } from '@/shared/services/usageScheduler';
+
+import {
+  runQuotaMonitorTick,
+  QUOTA_SUPPORTED_PROVIDERS,
+} from 'open-sse/services/quotaMonitor.js';
+
+import { runModelLockCleanup } from 'open-sse/services/modelLockCleanup.js';
+
+import { resumeExpiredPauses } from '@/shared/services/accountLifecycle';
+
+import { syncToJson as syncMitmAliasCache } from '@/lib/mitmAliasCache';
 
 // Inject correct paths and DB hooks into manager.js (CJS) from ESM context
+
 (function bootstrapMitm() {
   if (!process.env.MITM_SERVER_PATH) {
     try {
       const thisFile = fileURLToPath(import.meta.url);
+
       const appSrc = dirname(dirname(thisFile));
-      const candidate = join(appSrc, "mitm", "server.js");
+
+      const candidate = join(appSrc, 'mitm', 'server.js');
+
       if (existsSync(candidate)) process.env.MITM_SERVER_PATH = candidate;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
-  try { initDbHooks(getSettings, updateSettings); } catch { /* ignore */ }
+
+  try {
+    initDbHooks(getSettings, updateSettings);
+  } catch {
+    /* ignore */
+  }
 })();
 
 process.setMaxListeners(20);
 
 // Survive Next.js hot reload
-const g = global.__appSingleton ??= {
+
+const g = (global.__appSingleton ??= {
   signalHandlersRegistered: false,
+
   watchdogInterval: null,
+
   networkMonitorInterval: null,
+
   lastNetworkFingerprint: null,
+
   lastWatchdogTick: Date.now(),
+
   lastOnline: null,
+
   mitmStartInProgress: false,
+
   tunnelAutoResumed: false,
+
   tailscaleAutoResumed: false,
-};
+});
 
 export async function initializeApp() {
   try {
     await cleanupProviderConnections();
+
     const settings = await getSettings();
 
     if (settings.tunnelEnabled && !g.tunnelAutoResumed) {
       g.tunnelAutoResumed = true;
-      console.log("[InitApp] Tunnel was enabled, auto-resuming...");
-      safeRestartTunnel("startup").catch((e) => console.log("[InitApp] Tunnel resume failed:", e.message));
+
+      console.log('[InitApp] Tunnel was enabled, auto-resuming...');
+
+      safeRestartTunnel('startup').catch((e) =>
+        console.log('[InitApp] Tunnel resume failed:', e.message)
+      );
     }
 
     if (settings.tailscaleEnabled && !g.tailscaleAutoResumed) {
       g.tailscaleAutoResumed = true;
-      console.log("[InitApp] Tailscale was enabled, auto-resuming...");
-      safeRestartTailscale("startup").catch((e) => console.log("[InitApp] Tailscale resume failed:", e.message));
+
+      console.log('[InitApp] Tailscale was enabled, auto-resuming...');
+
+      safeRestartTailscale('startup').catch((e) =>
+        console.log('[InitApp] Tailscale resume failed:', e.message)
+      );
     }
 
     if (!g.signalHandlersRegistered) {
       const cleanup = () => {
-        try { removeAllDNSEntriesSync(); } catch { /* best effort */ }
+        try {
+          removeAllDNSEntriesSync();
+        } catch {
+          /* best effort */
+        }
+
         killCloudflared();
+
         process.exit();
       };
-      process.on("SIGINT", cleanup);
-      process.on("SIGTERM", cleanup);
-      process.on("exit", () => { try { removeAllDNSEntriesSync(); } catch { /* ignore */ } });
+
+      process.on('SIGINT', cleanup);
+
+      process.on('SIGTERM', cleanup);
+
+      process.on('exit', () => {
+        try {
+          removeAllDNSEntriesSync();
+        } catch {
+          /* ignore */
+        }
+      });
+
       g.signalHandlersRegistered = true;
     }
 
     ensureCloudflared().catch(() => {});
+
     syncMitmAliasCache().catch(() => {});
 
     setTunnelUnexpectedExitCallback(() => {
-      safeRestartTunnel("unexpected-exit").catch(() => {});
+      safeRestartTunnel('unexpected-exit').catch(() => {});
     });
 
     startWatchdog();
+
     startNetworkMonitor();
+
     autoStartMitm();
 
     // Claude auto-ping: warm 5h window right after reset
+
     startClaudeAutoPing();
 
     // QuotaMonitor: proactive quota-based lock/pause/recovery every 10 min
-    register("quota-monitor", { tickFn: runQuotaMonitorTick, intervalMs: 10 * 60 * 1000 });
 
-    // BUG-011 fix: auto-resume paused accounts when pausedUntil has expired
-    register("pause-recovery", {
+    register('quota-monitor', {
+      tickFn: runQuotaMonitorTick,
+      intervalMs: 10 * 60 * 1000,
+    });
+
+    // BUG-10 fix: auto-resume paused accounts for ALL providers, not just QUOTA_SUPPORTED_PROVIDERS.
+
+    // Previously, custom/compatible providers and any provider not in QUOTA_SUPPORTED_PROVIDERS
+
+    // would never have their expired pauses auto-resumed.
+
+    register('pause-recovery', {
       tickFn: async () => {
+        // First, resume for known quota providers (most common case)
+
         for (const provider of QUOTA_SUPPORTED_PROVIDERS) {
           try {
             await resumeExpiredPauses(provider);
@@ -103,179 +203,290 @@ export async function initializeApp() {
             console.warn(`[PauseRecovery] ${provider}: ${e.message}`);
           }
         }
+
+        // Then scan for any other providers with expired pauses not in QUOTA_SUPPORTED_PROVIDERS
+
+        try {
+          const inactiveConns = await getProviderConnections({
+            isActive: false,
+          });
+
+          const now = Date.now();
+
+          const otherProviders = new Set(
+            inactiveConns
+
+              .filter(
+                (c) => c.pausedUntil && new Date(c.pausedUntil).getTime() <= now
+              )
+
+              .map((c) => c.provider)
+
+              .filter((p) => !QUOTA_SUPPORTED_PROVIDERS.has(p))
+          );
+
+          for (const provider of otherProviders) {
+            try {
+              await resumeExpiredPauses(provider);
+            } catch (e) {
+              console.warn(`[PauseRecovery] ${provider}: ${e.message}`);
+            }
+          }
+        } catch (e) {
+          console.warn(`[PauseRecovery] scan failed: ${e.message}`);
+        }
       },
+
       intervalMs: 5 * 60 * 1000, // every 5 min
+    });
+
+    // BUG-8 fix: periodic cleanup of expired modelLock_* fields (hourly)
+    // Prevents DB bloat from accumulated expired locks on unused accounts
+    register('model-lock-cleanup', {
+      tickFn: runModelLockCleanup,
+      intervalMs: 60 * 60 * 1000, // every 1 hour
     });
 
     start();
   } catch (error) {
-    console.error("[InitApp] Error:", error);
+    console.error('[InitApp] Error:', error);
   }
 }
 
 async function autoStartMitm() {
   if (g.mitmStartInProgress) return;
+
   g.mitmStartInProgress = true;
+
   try {
     const settings = await getSettings();
+
     if (!settings.mitmEnabled) return;
+
     const mitmStatus = await getMitmStatus();
+
     if (mitmStatus.running) return;
 
     const password = await loadEncryptedPassword();
-    if (!password && process.platform !== "win32") {
-      console.log("[InitApp] MITM was enabled but no saved password found, skipping auto-start");
+
+    if (!password && process.platform !== 'win32') {
+      console.log(
+        '[InitApp] MITM was enabled but no saved password found, skipping auto-start'
+      );
+
       return;
     }
 
     const keys = await getApiKeys();
-    const activeKey = keys.find(k => k.isActive !== false);
 
-    console.log("[InitApp] MITM was enabled, auto-starting...");
-    await startMitm(activeKey?.key || "sk_9router", password);
-    console.log("[InitApp] MITM auto-started");
+    const activeKey = keys.find((k) => k.isActive !== false);
+
+    console.log('[InitApp] MITM was enabled, auto-starting...');
+
+    await startMitm(activeKey?.key || 'sk_9router', password);
+
+    console.log('[InitApp] MITM auto-started');
+
     try {
       await restoreToolDNS(password);
-      console.log("[InitApp] DNS restored from saved state");
+
+      console.log('[InitApp] DNS restored from saved state');
     } catch (e) {
-      console.log("[InitApp] DNS restore failed:", e.message);
+      console.log('[InitApp] DNS restore failed:', e.message);
     }
   } catch (err) {
-    console.log("[InitApp] MITM auto-start failed:", err.message);
+    console.log('[InitApp] MITM auto-start failed:', err.message);
   } finally {
     g.mitmStartInProgress = false;
   }
 }
 
 // Cooldown only applies to repeating watchdog ticks (anti hammer-loop).
-const FORCE_RESTART_REASONS = /^(startup|netchange|sleep|sleep\+netchange|online|unexpected-exit)$/;
+
+const FORCE_RESTART_REASONS =
+  /^(startup|netchange|sleep|sleep\+netchange|online|unexpected-exit)$/;
 
 async function safeRestartTunnel(reason) {
   const svc = getTunnelService();
+
   const settings = await getSettings();
+
   if (!settings.tunnelEnabled) return;
+
   if (svc.cancelToken.cancelled) return;
+
   if (svc.spawnInProgress) return;
 
   const force = FORCE_RESTART_REASONS.test(reason);
+
   if (isCloudflaredRunning()) return;
 
   if (!force && Date.now() - svc.lastRestartAt < RESTART_COOLDOWN_MS) {
     console.log(`[Tunnel] degraded but cooldown active, skip (${reason})`);
+
     return;
   }
-  if (!await checkInternet()) return;
 
-  console.log(`[Tunnel] safeRestart (${reason}) — tunnel unreachable${force ? " [force]" : ""}`);
+  if (!(await checkInternet())) return;
+
+  console.log(
+    `[Tunnel] safeRestart (${reason}) — tunnel unreachable${force ? ' [force]' : ''}`
+  );
+
   try {
     await enableTunnel();
+
     svc.lastRestartAt = Date.now();
-    console.log("[Tunnel] restart success");
+
+    console.log('[Tunnel] restart success');
   } catch (err) {
     if (!/cloudflared killed|tunnel cancelled/.test(err.message)) {
-      console.log("[Tunnel] restart failed:", err.message);
+      console.log('[Tunnel] restart failed:', err.message);
     }
   }
 }
 
 async function safeRestartTailscale(reason) {
   const svc = getTailscaleService();
+
   const settings = await getSettings();
+
   if (!settings.tailscaleEnabled) return;
+
   if (svc.cancelToken.cancelled) return;
+
   if (svc.spawnInProgress) return;
 
-  const running = reason === "startup" ? await isTailscaleRunningStrict() : isTailscaleRunning();
+  const running =
+    reason === 'startup'
+      ? await isTailscaleRunningStrict()
+      : isTailscaleRunning();
+
   if (running) return;
 
   if (isDaemonAlive() && svc.activeLocalPort) {
     try {
       await startFunnel(svc.activeLocalPort);
+
       svc.lastRestartAt = Date.now();
-      console.log("[Tailscale] funnel re-established (daemon alive)");
+
+      console.log('[Tailscale] funnel re-established (daemon alive)');
     } catch (err) {
-      console.log("[Tailscale] funnel recovery failed:", err.message);
+      console.log('[Tailscale] funnel recovery failed:', err.message);
     }
+
     return;
   }
 
   const force = FORCE_RESTART_REASONS.test(reason);
+
   if (!force && Date.now() - svc.lastRestartAt < RESTART_COOLDOWN_MS) {
     console.log(`[Tailscale] degraded but cooldown active, skip (${reason})`);
+
     return;
   }
-  if (!await checkInternet()) return;
 
-  console.log(`[Tailscale] safeRestart (${reason}) — daemon not running${force ? " [force]" : ""}`);
+  if (!(await checkInternet())) return;
+
+  console.log(
+    `[Tailscale] safeRestart (${reason}) — daemon not running${force ? ' [force]' : ''}`
+  );
+
   try {
     await enableTailscale();
+
     svc.lastRestartAt = Date.now();
-    console.log("[Tailscale] restart success");
+
+    console.log('[Tailscale] restart success');
   } catch (err) {
-    console.log("[Tailscale] restart failed:", err.message);
+    console.log('[Tailscale] restart failed:', err.message);
   }
 }
 
 function startWatchdog() {
   if (g.watchdogInterval) return;
+
   g.watchdogInterval = setInterval(() => {
-    safeRestartTunnel("watchdog").catch(() => {});
-    safeRestartTailscale("watchdog").catch(() => {});
+    safeRestartTunnel('watchdog').catch(() => {});
+
+    safeRestartTailscale('watchdog').catch(() => {});
   }, WATCHDOG_INTERVAL_MS);
+
   if (g.watchdogInterval.unref) g.watchdogInterval.unref();
 }
 
 function getNetworkFingerprint() {
   const interfaces = os.networkInterfaces();
+
   const active = [];
+
   for (const [name, addrs] of Object.entries(interfaces)) {
     if (!addrs) continue;
+
     if (VIRTUAL_IFACE_REGEX.test(name)) continue;
+
     for (const addr of addrs) {
-      if (!addr.internal && addr.family === "IPv4") {
+      if (!addr.internal && addr.family === 'IPv4') {
         active.push(`${name}:${addr.address}`);
       }
     }
   }
-  return active.sort().join("|");
+
+  return active.sort().join('|');
 }
 
 function startNetworkMonitor() {
   if (g.networkMonitorInterval) return;
 
   g.lastNetworkFingerprint = getNetworkFingerprint();
+
   g.lastWatchdogTick = Date.now();
+
   g.lastOnline = null;
 
   g.networkMonitorInterval = setInterval(async () => {
     try {
       const now = Date.now();
+
       const elapsed = now - g.lastWatchdogTick;
+
       g.lastWatchdogTick = now;
 
       const currentFingerprint = getNetworkFingerprint();
+
       const networkChanged = currentFingerprint !== g.lastNetworkFingerprint;
+
       const wasSleep = elapsed > NETWORK_CHECK_INTERVAL_MS * 6;
+
       if (networkChanged) g.lastNetworkFingerprint = currentFingerprint;
 
       const online = await checkInternet();
+
       const wasOffline = g.lastOnline === false;
+
       g.lastOnline = online;
 
       if (!online) return;
 
       const onlineEdge = wasOffline;
+
       if (!networkChanged && !wasSleep && !onlineEdge) return;
 
       await new Promise((r) => setTimeout(r, NETWORK_SETTLE_MS));
 
-      const reason = onlineEdge ? "online"
-        : wasSleep && networkChanged ? "sleep+netchange"
-        : wasSleep ? "sleep" : "netchange";
+      const reason = onlineEdge
+        ? 'online'
+        : wasSleep && networkChanged
+          ? 'sleep+netchange'
+          : wasSleep
+            ? 'sleep'
+            : 'netchange';
+
       safeRestartTunnel(reason).catch(() => {});
+
       safeRestartTailscale(reason).catch(() => {});
     } catch (err) {
-      console.log("[NetworkMonitor] error:", err.message);
+      console.log('[NetworkMonitor] error:', err.message);
     }
   }, NETWORK_CHECK_INTERVAL_MS);
 

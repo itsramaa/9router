@@ -28,7 +28,7 @@ from .utils import click_first_visible, fill_first_visible, safe_goto
 
 def _headers(provider: str) -> dict:
     h = {"Content-Type": "application/json"}
-    h = {"Referer": f"http://localhost:20128/dashboard/providers/{provider}"}
+    h["Referer"] = f"http://localhost:20128/dashboard/providers/{provider}"
     return h
 
 

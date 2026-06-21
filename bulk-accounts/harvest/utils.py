@@ -182,7 +182,10 @@ async def _operate_on_first_visible(
         if res is not None: return res
 
         # 2. If not found, enter loop to wait/interact for THIS selector
-        while True:
+        interact_retry_count = 0
+        MAX_INTERACT_RETRIES = 30  # Max 30 retries (30 seconds) per selector
+        while interact_retry_count < MAX_INTERACT_RETRIES:
+            interact_retry_count += 1
             slot = _current_slot.get()
             if no_interact or not slot: break 
 
@@ -213,6 +216,10 @@ async def _operate_on_first_visible(
                 res = await _try_find_and_act(active_page, selectors, operation, value, force)
                 if res is not None: return res
                 return "" if operation in ("get_text", "get_value") else True
+        
+        # If we hit max retries, log warning and return failure
+        if interact_retry_count >= MAX_INTERACT_RETRIES:
+            Emit.call({"type": "warn", "message": f"Max interact retries ({MAX_INTERACT_RETRIES}) reached for selector: {sel}"})
     
     return False if operation not in ("get_text", "get_value") else ""
 

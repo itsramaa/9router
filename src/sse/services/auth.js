@@ -14,12 +14,18 @@ import {
   getEarliestModelLockUntil,
 } from 'open-sse/services/accountFallback.js';
 
-import { resolveCooldown } from 'open-sse/services/cooldownPolicy.js';
+// BUG-09 fix: import LOCK_VS_PAUSE_THRESHOLD_MS as single source of truth
+
+import {
+  resolveCooldown,
+  LOCK_VS_PAUSE_THRESHOLD_MS,
+} from 'open-sse/services/cooldownPolicy.js';
 
 import {
   deactivate as lifecycleDeactivate,
   pause as lifecyclePause,
   clearQuotaWarning,
+  resumeExpiredPauses,
 } from '@/shared/services/accountLifecycle';
 
 import {
@@ -37,51 +43,15 @@ const _authState = (global.__authState ??= {
 
 /**
 
-
-
-
-
-
-
  * Get provider credentials from localDb
-
-
-
-
-
-
 
  * Filters out unavailable accounts and returns the selected account based on strategy
 
-
-
-
-
-
-
  * @param {string} provider - Provider name
-
-
-
-
-
-
 
  * @param {Set<string>|string|null} excludeConnectionIds - Connection ID(s) to exclude (for retry with next account)
 
-
-
-
-
-
-
  * @param {string|null} model - Model name for per-model rate limit filtering
-
-
-
-
-
-
 
  */
 
@@ -115,6 +85,14 @@ export async function getProviderCredentials(
     await currentMutex;
 
     const providerId = resolveProviderId(provider);
+
+    // BUG-7 fix: auto-resume expired pauses before credential selection
+    // This ensures expired pauses are immediately available without waiting for scheduler
+    try {
+      await resumeExpiredPauses(providerId);
+    } catch (e) {
+      log.warn('AUTH', `Failed to resume expired pauses for ${providerId}: ${e.message}`);
+    }
 
     // Inject a virtual connection for no-auth free providers
 
@@ -413,107 +391,31 @@ export async function getProviderCredentials(
 
 /**
 
-
-
-
-
-
-
  * Mark account+model as unavailable.
-
-
-
-
-
-
 
  * Dispatches to the appropriate lifecycle action based on CooldownPolicy classification:
 
-
-
-
-
-
-
  *   action=deactivate → AccountLifecycle.deactivate() (ban detected, permanent)
 
-
-
-
-
-
-
- *   action=pause + cooldownMs≥1h → AccountLifecycle.pause() (quota exhausted, long duration)
-
-
-
-
-
-
+ *   action=pause + cooldownMs≥LOCK_VS_PAUSE_THRESHOLD_MS → AccountLifecycle.pause() (quota exhausted, long duration)
 
  *   action=lock → modelLock_* per model (default, short-to-medium cooldown)
 
-
-
-
-
-
+ *
 
  * @param {string} connectionId
 
-
-
-
-
-
-
  * @param {number} status - HTTP status code from upstream
-
-
-
-
-
-
 
  * @param {string} errorText
 
-
-
-
-
-
-
  * @param {string|null} provider
-
-
-
-
-
-
 
  * @param {string|null} model - The specific model that triggered the error
 
-
-
-
-
-
-
  * @param {number|null} resetsAtMs - Optional precise provider-reported reset epoch ms
 
-
-
-
-
-
-
  * @returns {{ shouldFallback: boolean, cooldownMs: number }}
-
-
-
-
-
-
 
  */
 
@@ -572,9 +474,11 @@ export async function markAccountUnavailable(
     return { shouldFallback: true, cooldownMs: 0 };
   }
 
-  // Escalated pause — quota exhausted with long cooldown (≥1h)
+  // Escalated pause — quota exhausted with long cooldown (≥ LOCK_VS_PAUSE_THRESHOLD_MS)
 
-  if (action === 'pause' && cooldownMs >= 60 * 60 * 1000) {
+  // BUG-09 fix: use shared constant from cooldownPolicy.js instead of hardcoded 60*60*1000
+
+  if (action === 'pause' && cooldownMs >= LOCK_VS_PAUSE_THRESHOLD_MS) {
     try {
       await lifecyclePause(connectionId, cooldownMs);
 
@@ -616,7 +520,7 @@ export async function markAccountUnavailable(
 
   const lockUpdate = buildModelLockUpdate(model, cooldownMs);
 
-  // BUG-2 FIX: Only set testStatus='unavailable' for significant locks (>= 1 minute)
+  // Only set testStatus='unavailable' for significant locks (>= 1 minute)
 
   // Short rate limits (< 60s) should not mark account as unavailable in UI
 
@@ -657,67 +561,29 @@ export async function markAccountUnavailable(
 
 /**
 
-
-
-
-
-
-
  * Clear account error status on successful request.
-
-
-
-
-
-
 
  * - Clears modelLock_${model} (the model that just succeeded)
 
-
-
-
-
-
-
  * - Lazy-cleans any other expired modelLock_* keys
-
-
-
-
-
-
 
  * - Resets error state only if no active locks remain
 
+ *
 
+ * BUG-03 fix: moved quotaStatus check BEFORE the early-return guard so that
 
+ * stale QuotaMonitor warnings are always cleared on success, even when there
 
+ * are no active locks and testStatus is already 'active'.
 
-
+ *
 
  * @param {string} connectionId
 
-
-
-
-
-
-
  * @param {object} currentConnection - credentials object (has _connection) or raw connection
 
-
-
-
-
-
-
  * @param {string|null} model - model that succeeded
-
-
-
-
-
-
 
  */
 
@@ -738,6 +604,8 @@ export async function clearAccountError(
     k.startsWith('modelLock_')
   );
 
+  // BUG-03 fix: check ALL conditions including quotaStatus before early-returning
+
   if (
     !conn.testStatus &&
     !conn.lastError &&
@@ -755,13 +623,6 @@ export async function clearAccountError(
 
     return expiry && new Date(expiry).getTime() <= now;
   });
-
-  if (
-    keysToClear.length === 0 &&
-    conn.testStatus !== 'unavailable' &&
-    !conn.lastError
-  )
-    return;
 
   const remainingActiveLocks = allLockKeys.filter((k) => {
     if (keysToClear.includes(k)) return false;
@@ -781,23 +642,59 @@ export async function clearAccountError(
 
       lastErrorAt: null,
 
+      errorCode: null, // BUG-1 fix: clear stale error code on recovery
+
       backoffLevel: 0,
     });
   }
 
-  // Always clear quota warning flags on successful request
-  // This ensures stale QuotaMonitor warnings are removed when chat succeeds
+  // BUG-03 fix: always clear quotaStatus on success — this was previously
+
+
+
+  // unreachable when keysToClear was empty and testStatus was already 'active'
+
+
+
   if (conn.quotaStatus) {
+
+
+
     clearObj.quotaStatus = null;
+
+
+
     clearObj.quotaWarningAt = null;
+
+
+
     clearObj.quotaWarningMessage = null;
+
+
+
+    clearObj.errorCode = null; // BUG-1 fix: clear errorCode when clearing quota warning
+
+
+
   }
+
+
+
+  // Only write to DB if there is actually something to clear
+
+
+
+  if (Object.keys(clearObj).length === 0) return;
+
+
 
   await updateProviderConnection(connectionId, clearObj);
 
   // Invalidate QuotaStore cache so next quota check fetches fresh data
+
   try {
     const QuotaStore = await import('open-sse/services/quotaStore.js');
+
     QuotaStore.invalidate(connectionId);
   } catch (e) {
     // QuotaStore may not be available in all contexts
@@ -806,19 +703,7 @@ export async function clearAccountError(
 
 /**
 
-
-
-
-
-
-
  * Extract API key from request headers
-
-
-
-
-
-
 
  */
 
@@ -840,19 +725,7 @@ export function extractApiKey(request) {
 
 /**
 
-
-
-
-
-
-
  * Validate API key (optional - for local use can skip)
-
-
-
-
-
-
 
  */
 

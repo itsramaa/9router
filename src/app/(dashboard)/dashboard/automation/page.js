@@ -1,5 +1,4 @@
 'use client';
-
 import { useState, useCallback, useEffect } from 'react';
 
 import ConnectionBar from './components/ConnectionBar';
@@ -37,12 +36,15 @@ const DEFAULT_CONFIG = {
 };
 
 const MAX_LOG = 500;
+
 const SESSION_KEY = 'automation_session_v1';
 
 function loadSession() {
   if (typeof window === 'undefined') return {};
+
   try {
     const raw = localStorage.getItem(SESSION_KEY);
+
     return raw ? JSON.parse(raw) : {};
   } catch {
     return {};
@@ -90,18 +92,29 @@ export default function AutomationPage() {
 
   const [results, setResults] = useState([]);
 
+  const [failedAccounts, setFailedAccounts] = useState([]); // Track failed accounts for batch retry
+
+  const [retryMode, setRetryMode] = useState(false); // Track if we're in retry mode
+
   // Persist session state to localStorage on change (debounced)
+
   useEffect(() => {
     const tid = setTimeout(() => {
       try {
         localStorage.setItem(
           SESSION_KEY,
+
           JSON.stringify({
             config,
+
             runState,
+
             slots,
+
             accountProgress,
+
             logEntries: logEntries.slice(-200), // keep last 200 to stay within quota
+
             results,
           })
         );
@@ -109,36 +122,53 @@ export default function AutomationPage() {
         /* quota exceeded */
       }
     }, 800);
+
     return () => clearTimeout(tid);
   }, [config, runState, slots, accountProgress, logEntries, results]);
 
   // Restore persisted session after hydration (useEffect = client-only, avoids SSR mismatch)
+
   useEffect(() => {
     const s = loadSession();
+
     if (!s || !Object.keys(s).length) return;
+
     // Defer setState calls out of the synchronous effect body to avoid
+
     // "setState synchronously within an effect" React compiler warning.
+
     setTimeout(() => {
       if (s.config) setConfig((c) => ({ ...c, ...s.config }));
+
       const restoredRunState = (() => {
         const r = s.runState;
+
         return r === 'running' || r === 'stopping' ? 'done' : r || 'idle';
       })();
+
       if (s.runState) setRunState(restoredRunState);
+
       // Only restore live slot/progress state if harvest was actually mid-run.
+
       // A finished/idle session means the data is stale — don't show it on reload.
+
       const wasActive = restoredRunState === 'running';
+
       if (wasActive && s.slots?.length) setSlots(s.slots);
+
       if (
         wasActive &&
         s.accountProgress &&
         Object.keys(s.accountProgress).length
       )
         setAccountProgress(s.accountProgress);
+
       if (s.logEntries?.length) setLogEntries(s.logEntries);
+
       if (s.results?.length) setResults(s.results);
     }, 0);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // accounts state is fed by AccountsPanel's onChange (reads from DB directly)
 
   const pushLog = useCallback((entry) => {
@@ -172,36 +202,58 @@ export default function AutomationPage() {
   const handleMessage = useCallback(
     (msg) => {
       // ── System messages ───────────────────────────────────────────────
+
       if (msg.type === 'connected') {
         // WS reconnected — sync runState if server says harvest is not running
+
         if (!msg.running)
           setRunState((prev) => (prev === 'running' ? 'idle' : prev));
+
         return;
       }
+
       if (msg.type === 'started') {
         setRunState('running');
+
         return;
       }
+
       if (msg.type === 'done_stream') {
         // Subprocess stdout closed — harvest finished (naturally or killed)
+
         setRunState((prev) => (prev === 'running' ? 'done' : prev));
+
         return;
       }
+
       if (msg.type === 'stopped') {
         setRunState('idle');
+
         setSlots([]);
+
         setFrames({});
+
         return;
       }
+
       if (msg.type === 'reset') {
         setSlots([]);
+
         setFrames({});
+
         setResults([]);
+
         setAccountProgress({});
+
         setPendingInteract({});
+
+        setFailedAccounts([]);
+
         setRunState('idle');
+
         return;
       }
+
       // ─────────────────────────────────────────────────────────────────
 
       if (msg.type === 'frame' && msg.slot != null && msg.base64) {
@@ -315,6 +367,18 @@ export default function AutomationPage() {
         });
 
         const email = msg.email;
+
+        // Track failed accounts for batch retry
+        if (newStatus === 'error' && email) {
+          setFailedAccounts((prev) => {
+            const exists = prev.find((f) => f.email === email);
+            if (exists) return prev;
+            return [
+              ...prev,
+              { email, slot: msg.slot, error: msg.error || msg.message },
+            ];
+          });
+        }
 
         if (email && msg.provider) {
           setAccountProgress((prev) => {
@@ -477,6 +541,171 @@ export default function AutomationPage() {
     });
   }
 
+  async function handleRetrySlot(slotIdx) {
+    // Optimistic: mark slot as running immediately so Retry button disappears
+
+    setSlots((prev) =>
+      prev.map((s) =>
+        s.index === slotIdx
+          ? { ...s, status: 'running', message: 'Retrying...' }
+          : s
+      )
+    );
+
+    // Timeout fallback: if no WS status update arrives within 15s the server is
+
+    // likely stuck — revert to error so the Retry button reappears.
+
+    const fallbackTimer = setTimeout(() => {
+      setSlots((prev) =>
+        prev.map((s) =>
+          s.index === slotIdx && s.message === 'Retrying...'
+            ? {
+                ...s,
+                status: 'error',
+                message: 'Retry timed out — no response from server',
+              }
+            : s
+        )
+      );
+    }, 15000);
+
+    try {
+      await fetch('/api/automation/api/retry', {
+        method: 'POST',
+
+        headers: { 'Content-Type': 'application/json' },
+
+        body: JSON.stringify({ slot: slotIdx }),
+      });
+      clearTimeout(fallbackTimer);
+    } catch {
+      clearTimeout(fallbackTimer);
+
+      // Revert on network error
+
+      setSlots((prev) =>
+        prev.map((s) =>
+          s.index === slotIdx
+            ? { ...s, status: 'error', message: 'Retry failed' }
+            : s
+        )
+      );
+    }
+  }
+
+  async function handleRetryFailed() {
+    if (failedAccounts.length === 0) {
+      pushLog({
+        type: 'warn',
+        ts: ts(),
+        message: 'No failed accounts to retry.',
+      });
+      return;
+    }
+
+    const emails = failedAccounts.map((f) => f.email);
+
+    pushLog({
+      type: 'info',
+      ts: ts(),
+      message: `Retrying ${emails.length} failed account(s)...`,
+    });
+
+    // Clear failed list and start retry
+    setFailedAccounts([]);
+    setRetryMode(true);
+    setRunState('running');
+
+    try {
+      const res = await fetch('/api/automation/api/bulk-harvest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          emails,
+          providers: config.providers,
+          concurrent: config.concurrent,
+          proxy: config.proxy || undefined,
+          display_mode: config.displayMode,
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+
+      pushLog({ type: 'success', ts: ts(), message: 'Retry batch started' });
+    } catch (e) {
+      pushLog({
+        type: 'error',
+        ts: ts(),
+        message: `Retry failed: ${e.message}`,
+      });
+      setRunState('idle');
+    }
+  }
+
+  async function handleBulkHarvest(emails) {
+    if (!emails || emails.length === 0) {
+      pushLog({
+        type: 'error',
+        ts: ts(),
+        message: 'No accounts selected for bulk harvest.',
+      });
+
+      return;
+    }
+
+    // Clear failed accounts list for new run
+    setFailedAccounts([]);
+
+    pushLog({
+      type: 'info',
+      ts: ts(),
+      message: `Starting bulk harvest for ${emails.length} account(s)...`,
+    });
+
+    try {
+      const res = await fetch('/api/automation/api/bulk-harvest', {
+        method: 'POST',
+
+        headers: { 'Content-Type': 'application/json' },
+
+        body: JSON.stringify({
+          emails,
+
+          providers: config.providers,
+
+          concurrent: config.concurrent,
+
+          proxy: config.proxy || undefined,
+
+          display_mode: config.displayMode,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+
+      pushLog({
+        type: 'success',
+        ts: ts(),
+        message: `Bulk harvest started for ${emails.length} account(s) (PID: ${data.pid})`,
+      });
+    } catch (e) {
+      pushLog({
+        type: 'error',
+        ts: ts(),
+        message: `Bulk harvest failed: ${e.message}`,
+      });
+    }
+  }
+
   async function handleStart() {
     if (accounts.length === 0) {
       pushLog({ type: 'error', ts: ts(), message: 'No accounts configured.' });
@@ -491,6 +720,8 @@ export default function AutomationPage() {
     }
 
     setRunState('running');
+
+    setFailedAccounts([]); // Clear failed accounts from previous run
 
     // Pre-populate placeholder slots so the browser grid appears immediately
 
@@ -550,6 +781,7 @@ export default function AutomationPage() {
       });
 
       setRunState('idle');
+
       setSlots([]);
     }
   }
@@ -557,11 +789,13 @@ export default function AutomationPage() {
   async function handleSimulate() {
     if (accounts.length === 0) {
       pushLog({ type: 'error', ts: ts(), message: 'No accounts configured.' });
+
       return;
     }
 
     if (config.providers.length === 0) {
       pushLog({ type: 'error', ts: ts(), message: 'No providers selected.' });
+
       return;
     }
 
@@ -569,47 +803,69 @@ export default function AutomationPage() {
 
     const placeholders = Array.from({ length: config.concurrent }, (_, i) => ({
       index: i + 1,
+
       email: '',
+
       provider: '',
+
       message: 'Simulating...',
+
       status: 'idle',
     }));
 
     setSlots(placeholders);
+
     setFrames({});
+
     setAccountProgress({});
+
     setPendingInteract({});
 
     try {
       const res = await fetch('/api/automation/api/simulate', {
         method: 'POST',
+
         headers: { 'Content-Type': 'application/json' },
+
         body: JSON.stringify({
           providers: config.providers,
+
           concurrent: config.concurrent,
+
           fail_rate: 0.1,
+
           interact_rate: 0.1,
+
           delay: 0.4,
         }),
       });
 
       if (!res.ok) {
         const err = await res.text();
+
         pushLog({
           type: 'error',
+
           ts: ts(),
+
           message: `Simulate failed: ${err}`,
         });
+
         setRunState('idle');
+
         setSlots([]);
       }
     } catch (e) {
       pushLog({
         type: 'error',
+
         ts: ts(),
+
         message: `Simulate failed: ${e.message}`,
       });
+
       setRunState('idle');
+
       setSlots([]);
     }
   }
@@ -630,6 +886,7 @@ export default function AutomationPage() {
     try {
       localStorage.removeItem(SESSION_KEY);
     } catch {}
+
     setSlots([]);
 
     setFrames({});
@@ -641,6 +898,8 @@ export default function AutomationPage() {
     setAccountProgress({});
 
     setPendingInteract({});
+
+    setFailedAccounts([]);
 
     setRunState('idle');
 
@@ -714,7 +973,10 @@ export default function AutomationPage() {
       {/* Config + Accounts */}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <AccountsPanel onChange={setAccounts} />
+        <AccountsPanel
+          onChange={setAccounts}
+          onBulkHarvest={handleBulkHarvest}
+        />
 
         <ConfigPanel config={config} onChange={setConfig} />
       </div>
@@ -739,8 +1001,13 @@ export default function AutomationPage() {
             {accountList.length > 0 && (
               <>
                 <span className="text-text-muted text-[11px]">•</span>
+
                 <span className="text-[11px] text-text-muted font-mono">
-                  Process {accountList.filter(a => a.status === 'done' || a.status === 'error').length}/{accountList.length} accounts
+                  Success:{' '}
+                  {accountList.filter((a) => a.status === 'done').length} /
+                  Failed:{' '}
+                  {accountList.filter((a) => a.status === 'error').length} /
+                  Total: {accountList.length}
                 </span>
               </>
             )}
@@ -757,14 +1024,64 @@ export default function AutomationPage() {
                 slotIndex={slots.findIndex((s) => s.index === slot.index)}
                 logEntries={logEntries}
                 onInteract={(idx) => setInteractOpen(idx)}
+                onRetry={null}
               />
             ))}
           </div>
         </div>
       )}
 
+      {/* Global Retry Button - appears after run finishes with failures */}
+      {runState === 'done' && failedAccounts.length > 0 && (
+        <div className="mx-3 mb-3 rounded-xl border border-red-500/30 bg-red-500/5 overflow-hidden">
+          <div className="px-4 py-3 border-b border-red-500/20 flex items-center gap-2">
+            <span className="material-symbols-outlined text-[18px] text-red-400">
+              error
+            </span>
+            <span className="text-sm font-semibold text-red-400">
+              {failedAccounts.length} Account
+              {failedAccounts.length !== 1 ? 's' : ''} Failed
+            </span>
+          </div>
+
+          <div className="p-4">
+            <div className="mb-3 flex flex-wrap gap-2">
+              {failedAccounts.slice(0, 5).map((f) => (
+                <div
+                  key={f.email}
+                  className="text-xs font-mono px-2 py-1 rounded-lg bg-red-500/10 text-red-300 border border-red-500/20"
+                >
+                  {f.email}
+                </div>
+              ))}
+              {failedAccounts.length > 5 && (
+                <div className="text-xs font-mono px-2 py-1 rounded-lg bg-red-500/10 text-red-300/60">
+                  +{failedAccounts.length - 5} more
+                </div>
+              )}
+            </div>
+
+            <button
+              onClick={async () => {
+                const emails = failedAccounts.map((f) => f.email);
+                setRetryMode(true);
+                await handleBulkHarvest(emails);
+              }}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-300 font-semibold transition-colors cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[18px]">
+                restart_alt
+              </span>
+              Retry All Failed Accounts
+            </button>
+          </div>
+        </div>
+      )}
+
       {accountList.length > 0 && <AccountProgress accounts={accountList} />}
+
       <LiveLog entries={logEntries} onClear={() => setLogEntries([])} />
+
       <ResultsPanel results={results} />
 
       {interactOpen != null && interactSlot && (
