@@ -143,7 +143,8 @@ export default function AutomationPage() {
       // AUDIT-016: Always restore to 'idle' — never restore 'running'/'stopping'/'done'
       // A crashed harvest would leave 'running' in storage, misleading user into thinking
       // harvest succeeded. Require manual restart on page reload.
-      if (s.runState) setRunState('idle');
+      const restoredRunState = s.runState;
+      if (restoredRunState) setRunState('idle');
 
       // Only restore live slot/progress state if harvest was actually mid-run.
 
@@ -500,7 +501,7 @@ export default function AutomationPage() {
 
                 name: kEmail,
               }),
-            }).catch(() => {});
+            }).catch(() => { });
           }
         }
 
@@ -852,7 +853,7 @@ export default function AutomationPage() {
   async function handleReset() {
     try {
       localStorage.removeItem(SESSION_KEY);
-    } catch {}
+    } catch { }
 
     setSlots([]);
 
