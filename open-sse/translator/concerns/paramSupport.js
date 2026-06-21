@@ -10,6 +10,13 @@ const STRIP_RULES = [
   { provider: "github", match: /gpt-5\.4/i, drop: ["temperature"] },
   // GitHub Copilot Claude (except opus/sonnet 4.6): thinking + reasoning_effort rejected. #713
   { provider: "github", match: (m) => /claude/i.test(m) && !/claude.*(opus|sonnet).*4\.6/i.test(m), drop: ["thinking", "reasoning_effort"] },
+  // NVIDIA NIM: strict OpenAI subset — rejects stream_options, reasoning_effort,
+  // thinking, response_format, presence/frequency_penalty, logprobs, logit_bias, n, user.
+  { provider: "nvidia", match: /.*/, drop: [
+    "stream_options", "reasoning_effort", "reasoning", "thinking",
+    "response_format", "presence_penalty", "frequency_penalty",
+    "logprobs", "top_logprobs", "logit_bias", "n", "user",
+  ] },
 ];
 
 // Test a rule's match (regex or predicate) against the model id.

@@ -1,0 +1,49 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - region "Notifications (F8)":
+      - list [ref=e42]:
+        - status [ref=e43]:
+          - generic [ref=e44]:
+            - generic [ref=e45]: Login gagal
+            - generic [ref=e46]: Request failed with status code 401
+          - button [ref=e47] [cursor=pointer]:
+            - img [ref=e48]
+    - region "Notifications alt+T"
+    - generic [ref=e6]:
+      - navigation [ref=e7]:
+        - link "Langsung ke form login" [ref=e8] [cursor=pointer]:
+          - /url: "#login-form"
+      - generic [ref=e9]: Request failed with status code 401
+      - generic [ref=e10]:
+        - banner [ref=e11]:
+          - generic [ref=e12]:
+            - img [ref=e14]
+            - paragraph [ref=e18]: SiHuni
+        - generic [ref=e21]:
+          - generic [ref=e22]:
+            - heading "Masuk" [level=2] [ref=e23]
+            - paragraph [ref=e24]: Gunakan akun yang diberikan oleh pengelola.
+          - generic [ref=e25]:
+            - generic [ref=e26]:
+              - text: Email
+              - generic [ref=e27]:
+                - img
+                - textbox "Email" [ref=e28]:
+                  - /placeholder: anda@contoh.com
+                  - text: operator@sihuni.com
+            - generic [ref=e29]:
+              - text: Password
+              - generic [ref=e30]:
+                - img
+                - textbox "Password" [ref=e31]:
+                  - /placeholder: ••••••••
+                  - text: password123
+                - button "Tampilkan password" [ref=e32] [cursor=pointer]:
+                  - img [ref=e33]
+            - generic [ref=e36]:
+              - checkbox "Ingat saya di perangkat ini" [ref=e37] [cursor=pointer]
+              - checkbox
+              - generic [ref=e38] [cursor=pointer]: Ingat saya di perangkat ini
+            - button "Masuk" [ref=e39] [cursor=pointer]
+          - paragraph [ref=e40]: Belum punya akun? Hubungi pengelola properti Anda.
+  - status [ref=e52]: Notification Login gagalRequest failed with status code 401

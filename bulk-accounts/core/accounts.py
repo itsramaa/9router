@@ -47,9 +47,23 @@ class AccountLoader:
     def from_json(path: str) -> list[dict]:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, list):
-            return data
-        raise ValueError("JSON file must be a list of {email, password} objects")
+        if not isinstance(data, list):
+            raise ValueError("JSON file must be a list of {email, password} objects")
+        validated = []
+        for i, entry in enumerate(data):
+            if not isinstance(entry, dict):
+                Emit.call({"type": "warn", "message": f"Skipping non-dict entry at index {i}"})
+                continue
+            email = entry.get("email", "").strip()
+            password = entry.get("password", "").strip()
+            if not email or "@" not in email:
+                Emit.call({"type": "warn", "message": f"Skipping entry with invalid email at index {i}"})
+                continue
+            if not password:
+                Emit.call({"type": "warn", "message": f"Skipping entry with empty password: {email}"})
+                continue
+            validated.append({"email": email, "password": password, **{k: v for k, v in entry.items() if k not in ("email", "password")}})
+        return validated
 
 
 class AccountSaver:

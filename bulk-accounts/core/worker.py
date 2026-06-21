@@ -106,8 +106,15 @@ class HarvestWorker:
                 last_error = ""
 
                 try:
-                    mod = importlib.import_module(reg["module"])
-                    fn = getattr(mod, reg["fn"])
+                    # Import provider module
+                    try:
+                        mod = importlib.import_module(reg["module"])
+                        fn = getattr(mod, reg["fn"])
+                    except ImportError as import_err:
+                        raise Exception(f"Failed to import module '{reg['module']}': {import_err}")
+                    except AttributeError as attr_err:
+                        raise Exception(f"Module '{reg['module']}' missing function '{reg['fn']}': {attr_err}")
+                    
                     Emit.progress(pname, f"harvesting_{pname}", f"  -> {display}")
 
                     task = asyncio.create_task(
@@ -137,6 +144,13 @@ class HarvestWorker:
                     except asyncio.TimeoutError:
                         last_error = f"timeout after {self.timeout_per_provider}s"
                         Emit.error(pname, last_error)
+                        # AUDIT-011: Cancel and await task to prevent resource leak
+                        if not task.done():
+                            task.cancel()
+                            try:
+                                await task
+                            except asyncio.CancelledError:
+                                pass
                     except Exception as exc:
                         last_error = str(exc)
                         Emit.error(pname, str(exc))
@@ -188,10 +202,16 @@ class HarvestWorker:
             if manager:
                 try:
                     await manager.__aexit__(None, None, None)
+                    # AUDIT-012: Decrement active context counter
+                    async with BrowserManager._context_lock:
+                        BrowserManager.active_contexts -= 1
                 except Exception as _e:
                     logging.warning(f"Manager close error: {_e}")
+            # AUDIT-012: Only cleanup when no active contexts remain
             try:
-                cleanup_camoufox_temp()
+                async with BrowserManager._context_lock:
+                    if BrowserManager.active_contexts == 0:
+                        cleanup_camoufox_temp()
             except Exception as _e:
                 logging.warning(f"Cleanup error: {_e}")
 

@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import urlencode, urlparse, parse_qs
 
 from core.selectors import SELECTORS
-from .base import emit_progress, emit_error
+from .base import emit_progress, emit_error, check_already_connected
 from harvest.google import (
     is_google_consent_screen,
     handle_google_consent,
@@ -27,7 +27,7 @@ from harvest.google import (
     fill_google_password,
 )
 from .google_session import ensure_google_session
-from .dashboard import validate_and_save_to_dashboard, email_in_connection_list
+from .dashboard import validate_and_save_to_dashboard
 
 _S = SELECTORS["kiro"]
 
@@ -76,8 +76,9 @@ def _extract_code_from_url(url: str) -> str | None:
 async def harvest(page: Any, email: str, password: str, provider: str = "kiro") -> str:
     on_response_handler = None
     try:
-        if await email_in_connection_list(email, provider="kiro"):
-            return f"Kiro : Already connected ({email})"
+        # Check if already connected
+        if await check_already_connected(email, provider, "Kiro"):
+            return ""
 
         emit_progress(provider, "config", "Preparing Kiro PKCE flow...")
 
@@ -90,8 +91,8 @@ async def harvest(page: Any, email: str, password: str, provider: str = "kiro") 
                 return
             try:
                 loc = response.headers.get("location", "")
-                if loc and "kiro" in loc.lower():
-                    pass
+                if not loc or "kiro" not in loc.lower():
+                    return  # Not a kiro redirect — skip
                 code = _extract_code_from_url(loc)
                 if code:
                     state_data["auth_code"] = code
@@ -110,7 +111,10 @@ async def harvest(page: Any, email: str, password: str, provider: str = "kiro") 
                 return
             await route.continue_()
 
-        await page.route("**/*", _route_handler)
+        # Use specific pattern to only intercept Kiro OAuth redirects, not all requests
+        await page.route("**/*kiro*", _route_handler)
+        await page.route("**/*oauth*", _route_handler)
+        await page.route("**/*callback*", _route_handler)
 
         # 2. Start OAuth Flow
         auth_url = f"{_S['KIRO_AUTH_BASE']}/login?" + urlencode(

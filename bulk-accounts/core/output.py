@@ -18,7 +18,7 @@ class OutputWriter:
             for r in results:
                 key = r.get("api_keys", {}).get(pname, "")
                 if key:
-                    username = r["email"].split("@")[0]
+                    username = r.get("email", "unknown").split("@")[0]
                     rows.append(f"{username}:{key}")
             if rows:
                 lines.append(f"\n#======= {display} ======#")

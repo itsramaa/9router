@@ -1,28 +1,56 @@
 /**
+
  * Returns the Badge variant for a provider connection based on its lifecycle state.
+
  * @param {boolean|undefined} isActive
+
  * @param {string|undefined} effectiveStatus
+
  * @param {string|null} [pausedUntil] - ISO timestamp from AccountLifecycle.pause()
+
  * @param {string|null} [lastError] - last error message, used for ban detection
+
  * @returns {"success"|"error"|"warning"|"destructive"|"default"}
+
  */
 
-const BAN_KEYWORDS = ["banned", "suspended", "terminated", "disabled", "blocked", "revoked"];
+// BUG-14 fix: import from shared util instead of local definition
 
-export function getStatusVariant(isActive, effectiveStatus, pausedUntil = null, lastError = null) {
+import { isBannedError } from '@/shared/utils/connectionBanDetect';
+
+export function getStatusVariant(
+  isActive,
+  effectiveStatus,
+  pausedUntil = null,
+  lastError = null
+) {
   if (isActive === false) {
     // Ban detected from lastError
-    if (lastError && BAN_KEYWORDS.some(k => lastError.toLowerCase().includes(k))) {
-      return "destructive"; // red
+
+    if (isBannedError(lastError)) {
+      return 'destructive'; // red
     }
+
     // Auto-paused by QuotaMonitor — has a future expiry
+
     if (pausedUntil && new Date(pausedUntil).getTime() > Date.now()) {
-      return "warning"; // orange
+      return 'warning'; // orange
     }
+
     // Manual disable
-    return "default"; // gray
+
+    return 'default'; // gray
   }
-  if (effectiveStatus === "active" || effectiveStatus === "success") return "success";
-  if (effectiveStatus === "error" || effectiveStatus === "expired" || effectiveStatus === "unavailable") return "error";
-  return "default";
+
+  if (effectiveStatus === 'active' || effectiveStatus === 'success')
+    return 'success';
+
+  if (
+    effectiveStatus === 'error' ||
+    effectiveStatus === 'expired' ||
+    effectiveStatus === 'unavailable'
+  )
+    return 'error';
+
+  return 'default';
 }

@@ -202,13 +202,17 @@ async def fill_google_password(page: Any, password: str) -> bool:
         except Exception: continue
     return False
 
-async def handle_google_flow(page: Any, email: str, password: str, timeout: float = 90.0) -> bool:
+async def handle_google_flow(page: Any, email: str, password: str, timeout: float = 200.0) -> bool:
     """Combined Google Login & Consent flow helper."""
     deadline = time.monotonic() + timeout
     last_step = ""
     last_url = ""
     stuck_count = 0
     speedbump_sels = _S["google_login"]["SPEEDBUMP_BTNS"]
+    
+    # Dynamic stuck thresholds based on total timeout (30% and 60% of timeout)
+    stuck_warn_threshold = int(timeout * 0.3)  # Warning at 30% of timeout
+    stuck_abort_threshold = int(timeout * 0.6)  # Abort at 60% of timeout
 
     while time.monotonic() < deadline:
         try:
@@ -218,12 +222,12 @@ async def handle_google_flow(page: Any, email: str, password: str, timeout: floa
         # Track if we're stuck on the same page
         if url == last_url:
             stuck_count += 1
-            if stuck_count == 30:  # 30s on same page
+            if stuck_count == stuck_warn_threshold:
                 emit({"type": "progress", "provider": "google", "step": "stuck_warn",
-                      "message": f"Google flow stuck 30s on: {url[:120]}"})
-            if stuck_count >= 60:  # 60s — give up with diagnostic
+                      "message": f"Google flow stuck {stuck_warn_threshold}s on: {url[:120]}"})
+            if stuck_count >= stuck_abort_threshold:
                 emit({"type": "error", "provider": "google",
-                      "message": f"Google login stuck 60s on: {url[:120]} — aborting"})
+                      "message": f"Google login stuck {stuck_abort_threshold}s on: {url[:120]} — aborting"})
                 return False
         else:
             stuck_count = 0
@@ -269,7 +273,7 @@ async def handle_google_flow(page: Any, email: str, password: str, timeout: floa
           "message": f"Google login timed out after {timeout}s — last URL: {last_url[:120]}"})
     return False
 
-async def retry_google_login(page: Any, email: str, password: str, login_url: str, google_btn_selectors: list[str], max_retries: int = 2, timeout: float = 90.0) -> bool:
+async def retry_google_login(page: Any, email: str, password: str, login_url: str, google_btn_selectors: list[str], max_retries: int = 2, timeout: float = 200.0) -> bool:
     """Retry wrapper untuk Google OAuth login."""
     try:
         await safe_goto(page, login_url); await asyncio.sleep(1)

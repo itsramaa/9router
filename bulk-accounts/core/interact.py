@@ -89,6 +89,8 @@ def clear_interact_context(slot: int = 0) -> None:
     _current_streamer.set(None)
     _current_emit.set(None)
     _current_email.set("")
+    # AUDIT-014: Clean up InteractMode queues to prevent leaks
+    InteractMode.cleanup(slot)
 
 
 async def interact_gate(
@@ -149,7 +151,21 @@ async def interact_gate(
         if action == "continue":
             key = ""
             try:
-                key = (await page.evaluate("navigator.clipboard.readText()") or "").strip()
+                raw_clip = (await page.evaluate("navigator.clipboard.readText()") or "").strip()
+                # AUDIT-008: Validate clipboard content looks like an API key
+                # Reject if too short, too long, or contains whitespace/control chars
+                if (
+                    raw_clip
+                    and 10 <= len(raw_clip) <= 500
+                    and not any(c in raw_clip for c in ("\n", "\r", "\t"))
+                    and raw_clip.isprintable()
+                ):
+                    key = raw_clip
+                elif raw_clip:
+                    logging.warning(
+                        f"Clipboard content rejected for slot {slot} — "
+                        f"length={len(raw_clip)}, looks like non-key data"
+                    )
             except Exception:
                 pass
             Emit.emit({"type": "interact_result", "slot": slot, "action": "continue", "has_key": bool(key)})
@@ -158,6 +174,11 @@ async def interact_gate(
     finally:
         InteractMode.cleanup(slot)
         Emit.emit({"type": "interact_done", "slot": slot})
+
+# AUDIT-021: Max coordinate values to prevent browser crashes
+_MAX_COORD = 32767
+# AUDIT-021: Blocked URL schemes in goto actions
+_BLOCKED_SCHEMES = ("javascript:", "data:", "vbscript:", "file:")
 
 
 async def _execute_page_action(page: Any, slot: int, action: str) -> None:
@@ -172,7 +193,12 @@ async def _execute_page_action(page: Any, slot: int, action: str) -> None:
     try:
         if action.startswith("click:"):
             _, x, y = action.split(":", 2)
-            await active_page.mouse.click(int(x), int(y))
+            # AUDIT-021: Validate coordinate bounds
+            xi, yi = int(x), int(y)
+            if not (0 <= xi <= _MAX_COORD and 0 <= yi <= _MAX_COORD):
+                logging.warning(f"click coords out of bounds: ({xi},{yi})")
+                return
+            await active_page.mouse.click(xi, yi)
             Emit.progress("interact", "click", f"  🖱 Slot {slot} — click ({x},{y})")
             await asyncio.sleep(0.5)
             if streamer:
@@ -189,7 +215,12 @@ async def _execute_page_action(page: Any, slot: int, action: str) -> None:
             Emit.progress("interact", "type", f"  ⌨ Slot {slot} — typed {len(text)} chars")
         elif action.startswith("scroll:"):
             _, dx, dy = action.split(":", 2)
-            await active_page.mouse.wheel(int(dx), int(dy))
+            # AUDIT-021: Validate scroll delta bounds
+            dxi, dyi = int(dx), int(dy)
+            if not (-_MAX_COORD <= dxi <= _MAX_COORD and -_MAX_COORD <= dyi <= _MAX_COORD):
+                logging.warning(f"scroll delta out of bounds: ({dxi},{dyi})")
+                return
+            await active_page.mouse.wheel(dxi, dyi)
             if streamer:
                 await streamer.capture_once()
         elif action == "screenshot":
@@ -210,11 +241,18 @@ async def _execute_page_action(page: Any, slot: int, action: str) -> None:
             if streamer:
                 await streamer.capture_once()
         elif action.startswith("goto:"):
+            url = action[5:].strip()
+            # AUDIT-021: Block dangerous URL schemes
+            url_lower = url.lower()
+            if any(url_lower.startswith(scheme) for scheme in _BLOCKED_SCHEMES):
+                logging.warning(f"goto blocked — dangerous URL scheme: {url[:50]}")
+                return
             try:
-                await active_page.goto(action[5:].strip(), timeout=15000)
+                await active_page.goto(url, timeout=15000)
             except Exception:
                 pass
             if streamer:
                 await streamer.capture_once()
     except Exception as e:
         logging.warning(f"Action failed: {action} - {e}")
+

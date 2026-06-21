@@ -43,8 +43,9 @@ export const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
 
 // Cooldown durations (ms)
 const COOLDOWN = {
-  long: 2 * 60 * 1000,
-  short: 5 * 1000,
+  long: 2 * 60 * 1000,      // 2 min — auth errors, transient issues
+  short: 5 * 1000,           // 5 sec — minor client errors
+  quota: 24 * 60 * 60 * 1000, // 24 hours — quota/credit exhaustion (triggers lifecycle pause)
 };
 
 /**
@@ -64,7 +65,11 @@ export const ERROR_RULES = [
   // --- Text-based rules (checked first, order = priority) ---
   { text: 'no credentials', cooldownMs: COOLDOWN.long, isAuthError: true },
   { text: 'request not allowed', cooldownMs: COOLDOWN.short },
-  { text: 'improperly formed request', cooldownMs: COOLDOWN.long, shouldFallback: false },
+  {
+    text: 'improperly formed request',
+    cooldownMs: COOLDOWN.long,
+    shouldFallback: false,
+  },
 
   // Rate limit patterns (temporary, per-minute throttling) — backoff, don't pause
   { text: 'rate limit', backoff: true, isRateLimit: true },
@@ -75,15 +80,64 @@ export const ERROR_RULES = [
   { text: 'throttled', backoff: true, isRateLimit: true },
 
   // Quota exhaustion patterns (monthly/daily hard cap) — pause account
-  { text: 'quota exceeded', cooldownMs: COOLDOWN.long, isQuotaExhausted: true },
-  { text: 'insufficient credits', cooldownMs: COOLDOWN.long, isQuotaExhausted: true },
-  { text: 'no credits remaining', cooldownMs: COOLDOWN.long, isQuotaExhausted: true },
-  { text: 'credit limit reached', cooldownMs: COOLDOWN.long, isQuotaExhausted: true },
-  { text: 'monthly limit reached', cooldownMs: COOLDOWN.long, isQuotaExhausted: true },
-  { text: 'daily limit reached', cooldownMs: COOLDOWN.long, isQuotaExhausted: true },
-  { text: 'usage limit exceeded', cooldownMs: COOLDOWN.long, isQuotaExhausted: true },
-  { text: 'plan limit', cooldownMs: COOLDOWN.long, isQuotaExhausted: true },
-  { text: 'subscription limit', cooldownMs: COOLDOWN.long, isQuotaExhausted: true },
+  { text: 'quota exceeded', cooldownMs: COOLDOWN.quota, isQuotaExhausted: true },
+  {
+    text: 'insufficient credits',
+    cooldownMs: COOLDOWN.quota,
+    isQuotaExhausted: true,
+  },
+  {
+    text: 'no credits remaining',
+    cooldownMs: COOLDOWN.quota,
+    isQuotaExhausted: true,
+  },
+  {
+    text: 'credit limit reached',
+    cooldownMs: COOLDOWN.quota,
+    isQuotaExhausted: true,
+  },
+  {
+    text: 'monthly limit reached',
+    cooldownMs: COOLDOWN.quota,
+    isQuotaExhausted: true,
+  },
+  {
+    text: 'daily limit reached',
+    cooldownMs: COOLDOWN.quota,
+    isQuotaExhausted: true,
+  },
+  {
+    text: 'usage limit exceeded',
+    cooldownMs: COOLDOWN.quota,
+    isQuotaExhausted: true,
+  },
+  { text: 'plan limit', cooldownMs: COOLDOWN.quota, isQuotaExhausted: true },
+  {
+    text: 'subscription limit',
+    cooldownMs: COOLDOWN.quota,
+    isQuotaExhausted: true,
+  },
+  {
+    text: 'You have reached the limit.',
+    cooldownMs: COOLDOWN.quota,
+    isQuotaExhausted: true,
+  },
+  // xAI (Grok) spending-limit: 403 + "personal-team-blocked:spending-limit" / "run out of credits"
+  {
+    text: 'spending-limit',
+    cooldownMs: COOLDOWN.quota,
+    isQuotaExhausted: true,
+  },
+  {
+    text: 'run out of credits',
+    cooldownMs: COOLDOWN.quota,
+    isQuotaExhausted: true,
+  },
+  {
+    text: 'out of credits',
+    cooldownMs: COOLDOWN.quota,
+    isQuotaExhausted: true,
+  },
 
   // Server overload (temporary) — backoff, don't pause
   { text: 'capacity', backoff: true, isRateLimit: true },
@@ -92,9 +146,9 @@ export const ERROR_RULES = [
 
   // --- Status-based rules (fallback when text doesn't match) ---
   { status: 400, cooldownMs: 0, shouldFallback: false }, // BUG-005: bad request — don't cycle accounts
-  { status: 401, cooldownMs: COOLDOWN.long, isAuthError: true },
-  { status: 402, cooldownMs: COOLDOWN.long, isQuotaExhausted: true },
-  { status: 403, cooldownMs: COOLDOWN.long, isAuthError: true },
+  { status: 401, cooldownMs: COOLDOWN.quota, isAuthError: true },
+  { status: 402, cooldownMs: COOLDOWN.quota, isQuotaExhausted: true },
+  { status: 403, cooldownMs: COOLDOWN.quota, isAuthError: true },
   { status: 404, cooldownMs: COOLDOWN.long },
   { status: 429, backoff: true, isRateLimit: true }, // Default 429 = rate limit unless text matches quota
 ];

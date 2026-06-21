@@ -67,7 +67,7 @@ async def ensure_google_session(page: Any, email: str, password: str) -> bool:
 
         # Need a full login
         emit_progress("google_session", "login", "Google not signed in — running login flow...")
-        ok = await handle_google_flow(page, email, password, timeout=120.0)
+        ok = await handle_google_flow(page, email, password, timeout=200.0)
         if ok:
             emit_progress("google_session", "ok", "Google login successful.")
             _google_session_ok.set(True)

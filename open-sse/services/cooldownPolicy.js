@@ -51,6 +51,36 @@ export const ESCALATION_THRESHOLD = 8;
 const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
 
 /**
+ * BUG-09 fix: Threshold (1h) above which action="pause" triggers lifecyclePause()
+ * instead of per-model lock. Exported as single source of truth — consumed by
+ * auth.js markAccountUnavailable() and quotaMonitor.js.
+ * @see src/sse/services/auth.js — markAccountUnavailable
+ * @see open-sse/services/quotaMonitor.js
+ */
+export const LOCK_VS_PAUSE_THRESHOLD_MS = 60 * 60 * 1000;
+
+/**
+ * Calculate milliseconds until the 1st day of next month (UTC).
+ * Used for monthly quota exhaustion (e.g. MONTHLY_REQUEST_COUNT).
+ * @returns {number} milliseconds until next month starts
+ */
+export function msUntilNextMonth() {
+  const now = new Date();
+  const nextMonth = new Date(
+    Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth() + 1,
+      1,
+      0,
+      0,
+      0,
+      0
+    )
+  );
+  return Math.max(nextMonth.getTime() - now.getTime(), 60 * 1000); // At least 1 minute
+}
+
+/**
  * Calculate exponential backoff cooldown for rate limits.
  * Level 1: 2s, Level 2: 4s, Level 3: 8s … cap at BACKOFF_CONFIG.max (5 min).
  * @param {number} backoffLevel
@@ -72,6 +102,10 @@ export function computeCooldown(backoffLevel = 0) {
  * - Ban patterns → action="deactivate"
  *
  * BUG-005 fix: rules with shouldFallback: false return immediately without cycling accounts.
+ *
+ * BUG-08 fix: quota exhaustion and auth error rules now return newBackoffLevel
+ * so the caller can always update backoffLevel consistently (previously these
+ * paths omitted newBackoffLevel, leaving backoffLevel stale on the connection).
  *
  * @param {number} status - HTTP status code
  * @param {string} errorText - Error message from upstream
@@ -116,10 +150,13 @@ export function classifyError(status, errorText, backoffLevel = 0) {
       }
 
       // Quota exhaustion or auth error → immediate pause (CHAT-FIRST POLICY)
+      // BUG-08 fix: include newBackoffLevel so caller can update backoffLevel consistently
       if (rule.isQuotaExhausted || rule.isAuthError) {
+        const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
         return {
           shouldFallback: true,
           cooldownMs: rule.cooldownMs ?? 0,
+          newBackoffLevel: newLevel,
           action: 'pause',
           isQuotaExhausted: rule.isQuotaExhausted,
           isAuthError: rule.isAuthError,
@@ -162,10 +199,13 @@ export function classifyError(status, errorText, backoffLevel = 0) {
       }
 
       // Quota exhaustion or auth error → immediate pause (CHAT-FIRST POLICY)
+      // BUG-08 fix: include newBackoffLevel
       if (rule.isQuotaExhausted || rule.isAuthError) {
+        const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
         return {
           shouldFallback: true,
           cooldownMs: rule.cooldownMs ?? 0,
+          newBackoffLevel: newLevel,
           action: 'pause',
           isQuotaExhausted: rule.isQuotaExhausted,
           isAuthError: rule.isAuthError,
@@ -222,11 +262,13 @@ export function applyPreciseCooldown(resetsAtMs) {
  * Single entry point used by auth.js markAccountUnavailable.
  *
  * CHAT-FIRST PAUSE POLICY:
- * - Ban patterns → deactivate (highest priority)
+ * - Ban patterns → deactivate (highest priority, handled by classifyError)
  * - Classify error first to determine action type (lock vs pause vs deactivate)
  * - If provider reported a precise reset time, use it as cooldown duration
  *   but KEEP the action type from classifyError (lock for rate limits, pause for quota/auth)
  * - Rate limits with resets_at are capped at 30 min to avoid false-pausing
+ *
+ * BUG-5 fix: Removed duplicate ban detection (now only in classifyError)
  *
  * @param {number} status
  * @param {string} errorText
@@ -240,34 +282,21 @@ export function resolveCooldown(
   backoffLevel = 0,
   resetsAtMs = null
 ) {
-  // Ban detection always wins, even over provider-reported reset times
-  const lower = errorText
-    ? (typeof errorText === 'string'
-        ? errorText
-        : JSON.stringify(errorText)
-      ).toLowerCase()
-    : '';
-
-  if (lower && BAN_PATTERNS.some((p) => lower.includes(p))) {
-    return {
-      shouldFallback: true,
-      cooldownMs: 0,
-      newBackoffLevel: backoffLevel,
-      action: 'deactivate',
-      isAuthError: true,
-    };
-  }
-
+  // BUG-5 fix: Duplicate ban detection removed from here
+  // Ban patterns are now only checked in classifyError() for single source of truth
+  
   // Classify the error first to determine the action type
   const classified = classifyError(status, errorText, backoffLevel);
 
   // If provider reported a precise reset time, use it as cooldown duration
   // but KEEP the action type from classifyError (lock for rate limits, pause for quota/auth)
   const precise = applyPreciseCooldown(resetsAtMs);
+
   if (precise) {
     // For rate limits, cap the precise cooldown to 30 min
     // to avoid false-pausing on long rate limit windows (e.g. Codex 5-6h resets_at)
     let cooldownMs = precise.cooldownMs;
+
     if (
       classified.isRateLimit &&
       !classified.isQuotaExhausted &&

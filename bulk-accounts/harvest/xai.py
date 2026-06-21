@@ -8,9 +8,8 @@ import asyncio
 from typing import Any
 from core.config import Config
 from core.selectors import SELECTORS
-from .base import emit_progress, emit_error, handle_oauth_popup
+from .base import emit_progress, emit_error, handle_oauth_popup, check_already_connected, verify_connection_in_dashboard
 from .google_session import ensure_google_session
-from .dashboard import email_in_connection_list
 from .utils import (
     click_first_visible,
     get_value_first_visible,
@@ -24,8 +23,9 @@ _S = SELECTORS["xai"]
 async def harvest(page: Any, email: str, password: str, provider: str = "xai") -> str:
     emit_progress(provider, "navigate", "Starting xAI Connection...")
     try:
-        if await email_in_connection_list(email, provider="xai"):
-            return f"xAI : Already connected ({email})"
+        # Check if already connected
+        if await check_already_connected(email, provider, "xAI"):
+            return ""
 
         emit_progress(provider, "google", "Ensuring Google session...")
         await ensure_google_session(page, email, password)
@@ -43,7 +43,6 @@ async def harvest(page: Any, email: str, password: str, provider: str = "xai") -
                 password,
                 google_btn_sels=_S["GOOGLE_BTN"],
                 authorize_sels=_S["AUTHORIZE_BTN"],
-                captcha_before_popup=False,
                 post_auth_delay=5,
                 dont_close=True,
             )
@@ -70,11 +69,8 @@ async def harvest(page: Any, email: str, password: str, provider: str = "xai") -
                     except Exception:
                         pass
 
-                    for _ in range(6):
-                        await safe_goto(page, url)
-                        if await email_in_connection_list(email, provider="xai"):
-                            return f"xAI : Success"
-                        await asyncio.sleep(3)
+                    await verify_connection_in_dashboard(page, email, provider)
+                    return ""  # Success for log_only provider
 
             if attempt < 2:
                 emit_progress(

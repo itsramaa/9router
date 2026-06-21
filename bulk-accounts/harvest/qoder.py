@@ -12,9 +12,10 @@ from .base import (
     emit_progress,
     emit_error,
     handle_oauth_popup,
+    check_already_connected,
+    verify_connection_in_dashboard,
 )
 from .google_session import ensure_google_session
-from .dashboard import email_in_connection_list
 from .utils import click_first_visible, safe_goto
 
 _S = SELECTORS["qoder"]
@@ -23,8 +24,9 @@ _S = SELECTORS["qoder"]
 async def harvest(page: Any, email: str, password: str, provider: str = "qoder") -> str:
     emit_progress(provider, "navigate", "Starting Qoder Connection...")
     try:
-        if await email_in_connection_list(email, provider="qoder"):
-            return f"Qoder : Already connected ({email})"
+        # Check if already connected
+        if await check_already_connected(email, provider, "Qoder"):
+            return ""
 
         emit_progress(provider, "google", "Ensuring Google session...")
         await ensure_google_session(page, email, password)
@@ -37,7 +39,7 @@ async def harvest(page: Any, email: str, password: str, provider: str = "qoder")
             return ""
         await asyncio.sleep(3)
 
-        ok = await handle_oauth_popup(
+        ok, _ = await handle_oauth_popup(
             page,
             email,
             password,
@@ -60,11 +62,9 @@ async def harvest(page: Any, email: str, password: str, provider: str = "qoder")
         await safe_goto(page, url)
         await asyncio.sleep(3)
 
-        for _ in range(6):
-            if await email_in_connection_list(email, provider="qoder"):
-                return f"Qoder : Success"
-            await asyncio.sleep(3)
-        return ""
+        # Verify connection in dashboard
+        await verify_connection_in_dashboard(page, email, provider)
+        return ""  # Success for log_only provider
     except Exception as e:
         emit_error(provider, e)
         return ""
