@@ -3,13 +3,19 @@
 import { useState } from "react";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
+// AUDIT-022: Mask API keys in display — show first 4 + last 4 chars only
+function maskKey(key) {
+  if (typeof key !== "string" || key.length <= 12) return "••••••••";
+  return `${key.slice(0, 4)}${"•".repeat(Math.min(key.length - 8, 12))}${key.slice(-4)}`;
+}
+
 function CopyBtn({ value }) {
   const { copied, copy } = useCopyToClipboard(1500);
   return (
     <button
       onClick={() => copy(value)}
       className="p-1 rounded text-text-muted hover:text-primary transition-colors cursor-pointer"
-      title={value}
+      title="Copy full key"
     >
       <span className="material-symbols-outlined text-[14px]">{copied ? "check" : "content_copy"}</span>
     </button>
@@ -100,7 +106,10 @@ export default function ResultsPanel({ results }) {
                 <tr key={i} className="hover:bg-surface-2 transition-colors">
                   <td className="px-4 py-2 text-primary font-medium">{r.provider}</td>
                   <td className="px-4 py-2 font-mono text-text-muted truncate max-w-[160px]">{r.email}</td>
-                  <td className="px-4 py-2 font-mono text-text-main truncate max-w-[200px]">{r.key}</td>
+                  {/* AUDIT-022: Show masked key in UI — use CopyBtn for full key */}
+                  <td className="px-4 py-2 font-mono text-text-main truncate max-w-[200px] select-none" title="Click copy to get full key">
+                    {maskKey(r.key)}
+                  </td>
                   <td className="px-2 py-2">
                     <CopyBtn value={r.key} />
                   </td>
@@ -113,3 +122,5 @@ export default function ResultsPanel({ results }) {
     </div>
   );
 }
+
+

@@ -473,6 +473,19 @@ export default function AutomationPage() {
           });
 
           for (const { provider, key, email: kEmail } of newKeys) {
+            // AUDIT-007: Sanitize API key before injection to prevent SQL injection
+            // Keys must be printable ASCII, max 500 chars, min 8 chars
+            const sanitizedKey = (() => {
+              if (typeof key !== 'string') return '';
+              if (key.length < 8 || key.length > 500) return '';
+              // Block SQL-dangerous characters
+              if (/['";\-\-]/.test(key) && /\b(drop|delete|insert|update|select|union)\b/i.test(key)) return '';
+              return key;
+            })();
+            if (!sanitizedKey) {
+              console.warn('[AUDIT-007] Skipping injection — suspicious key format for provider:', provider);
+              continue;
+            }
             fetch('/api/automation/inject-key', {
               method: 'POST',
 
@@ -481,7 +494,7 @@ export default function AutomationPage() {
               body: JSON.stringify({
                 provider,
 
-                key,
+                key: sanitizedKey,
 
                 email: kEmail,
 
@@ -538,58 +551,10 @@ export default function AutomationPage() {
     });
   }
 
-  async function handleRetrySlot(slotIdx) {
-    // Optimistic: mark slot as running immediately so Retry button disappears
 
-    setSlots((prev) =>
-      prev.map((s) =>
-        s.index === slotIdx
-          ? { ...s, status: 'running', message: 'Retrying...' }
-          : s
-      )
-    );
+  // AUDIT-010: handleRetrySlot removed — per-slot retry was disabled (onRetry=null).
+  // Batch retry via handleRetryFailed() is the active retry path.
 
-    // Timeout fallback: if no WS status update arrives within 15s the server is
-
-    // likely stuck — revert to error so the Retry button reappears.
-
-    const fallbackTimer = setTimeout(() => {
-      setSlots((prev) =>
-        prev.map((s) =>
-          s.index === slotIdx && s.message === 'Retrying...'
-            ? {
-                ...s,
-                status: 'error',
-                message: 'Retry timed out — no response from server',
-              }
-            : s
-        )
-      );
-    }, 15000);
-
-    try {
-      await fetch('/api/automation/api/retry', {
-        method: 'POST',
-
-        headers: { 'Content-Type': 'application/json' },
-
-        body: JSON.stringify({ slot: slotIdx }),
-      });
-      clearTimeout(fallbackTimer);
-    } catch {
-      clearTimeout(fallbackTimer);
-
-      // Revert on network error
-
-      setSlots((prev) =>
-        prev.map((s) =>
-          s.index === slotIdx
-            ? { ...s, status: 'error', message: 'Retry failed' }
-            : s
-        )
-      );
-    }
-  }
 
   async function handleRetryFailed() {
     if (failedAccounts.length === 0) {
