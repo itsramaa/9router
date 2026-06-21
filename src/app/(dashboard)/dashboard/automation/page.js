@@ -140,13 +140,10 @@ export default function AutomationPage() {
     setTimeout(() => {
       if (s.config) setConfig((c) => ({ ...c, ...s.config }));
 
-      const restoredRunState = (() => {
-        const r = s.runState;
-
-        return r === 'running' || r === 'stopping' ? 'done' : r || 'idle';
-      })();
-
-      if (s.runState) setRunState(restoredRunState);
+      // AUDIT-016: Always restore to 'idle' — never restore 'running'/'stopping'/'done'
+      // A crashed harvest would leave 'running' in storage, misleading user into thinking
+      // harvest succeeded. Require manual restart on page reload.
+      if (s.runState) setRunState('idle');
 
       // Only restore live slot/progress state if harvest was actually mid-run.
 
@@ -873,6 +870,11 @@ export default function AutomationPage() {
   async function handleStop() {
     setRunState('stopping');
 
+    // AUDIT-009: Clear failed accounts and retry mode on manual stop
+    // Prevents stale "failed" list from persisting after user stops a run
+    setFailedAccounts([]);
+    setRetryMode(false);
+
     try {
       await fetch('/api/automation/api/stop', { method: 'POST' });
     } catch {
@@ -900,6 +902,7 @@ export default function AutomationPage() {
     setPendingInteract({});
 
     setFailedAccounts([]);
+    setRetryMode(false);  // AUDIT-009: ensure retry mode cleared on reset
 
     setRunState('idle');
 

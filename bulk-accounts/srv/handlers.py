@@ -38,6 +38,24 @@ _WIN_PGROUP = (
     else {}
 )
 
+# AUDIT-019: Simple in-memory rate limiter for harvest start/stop
+# Max 5 requests per 60 seconds per IP
+import time as _time
+_RATE_LIMIT_MAX = 5
+_RATE_LIMIT_WINDOW = 60  # seconds
+_rate_buckets: dict[str, list[float]] = {}
+
+def _check_rate_limit(ip: str) -> bool:
+    """Return True if request is allowed, False if rate limited."""
+    now = _time.monotonic()
+    hits = _rate_buckets.get(ip, [])
+    hits = [t for t in hits if now - t < _RATE_LIMIT_WINDOW]
+    if len(hits) >= _RATE_LIMIT_MAX:
+        return False
+    hits.append(now)
+    _rate_buckets[ip] = hits
+    return True
+
 
 class ServerHandlers:
     def __init__(self, state: ServerState, ws_mgr: WebSocketManager):
@@ -177,6 +195,13 @@ class ServerHandlers:
         return web.json_response({"completed": {}, "total_keys": 0})
 
     async def handle_start(self, request: web.Request) -> web.Response:
+        # AUDIT-019: Rate limit — max 5 start requests per 60s per IP
+        ip = request.remote or "unknown"
+        if not _check_rate_limit(ip):
+            return web.json_response(
+                {"ok": False, "error": "Rate limit exceeded. Try again later."},
+                status=429,
+            )
         if self.state.proc and self.state.proc.returncode is None:
             return web.json_response({"ok": False, "error": "Already running"})
 
@@ -320,12 +345,22 @@ class ServerHandlers:
 
         self.state.proc_stdin = self.state.proc.stdin
 
-        # Cleanup temp proxy file if created
+        # AUDIT-017: Defer proxy temp file cleanup until after process exits
+        # Immediate deletion races with subprocess startup reading the file
         if "temp_proxy_file" in locals():
-            try:
-                temp_proxy_file.unlink(missing_ok=True)
-            except Exception:
-                pass
+            _proxy_file_ref = temp_proxy_file
+            _proc_ref = self.state.proc
+            async def _cleanup_proxy_file():
+                try:
+                    await _proc_ref.wait()
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        _proxy_file_ref.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            asyncio.create_task(_cleanup_proxy_file())
 
         self.state.proc_task = asyncio.create_task(
             self.ws_mgr.stream_proc(self.state.proc)
@@ -342,6 +377,13 @@ class ServerHandlers:
         return web.json_response({"ok": True, "pid": self.state.proc.pid})
 
     async def handle_stop(self, request: web.Request) -> web.Response:
+        # AUDIT-019: Rate limit — max 5 stop requests per 60s per IP
+        ip = request.remote or "unknown"
+        if not _check_rate_limit(ip):
+            return web.json_response(
+                {"ok": False, "error": "Rate limit exceeded. Try again later."},
+                status=429,
+            )
         if self.state.proc and self.state.proc.returncode is None:
             try:
                 self.state.proc.terminate()

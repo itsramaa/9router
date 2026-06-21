@@ -10,6 +10,17 @@ from aiohttp import web, WSMsgType
 
 from .state import ServerState
 
+# AUDIT-006: Bounded send timeout per client — slow clients get disconnected
+_WS_SEND_TIMEOUT = 3.0  # seconds
+
+# AUDIT-020: Allowed WebSocket origins (localhost only)
+_ALLOWED_ORIGINS = {
+    "http://localhost",
+    "https://localhost",
+    "http://127.0.0.1",
+    "https://127.0.0.1",
+}
+
 
 class WebSocketManager:
     def __init__(self, state: ServerState):
@@ -20,12 +31,21 @@ class WebSocketManager:
         if not self.state.ws_clients:
             return
         text = json.dumps(msg, ensure_ascii=False)
-        # BUG-034 fix: store task references to prevent "Task destroyed but pending" warnings
+
         async def _send(ws):
             try:
-                await ws.send_str(text)
+                # AUDIT-006: Per-client send timeout to prevent slow-client queue buildup
+                await asyncio.wait_for(ws.send_str(text), timeout=_WS_SEND_TIMEOUT)
+            except asyncio.TimeoutError:
+                logging.warning("WS client send timed out — disconnecting slow client")
+                self.state.ws_clients.discard(ws)
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
             except Exception:
                 self.state.ws_clients.discard(ws)
+
         for ws in list(self.state.ws_clients):
             task = asyncio.create_task(_send(ws))
             self._pending_tasks.add(task)
@@ -72,6 +92,20 @@ class WebSocketManager:
             })
 
     async def handle_ws(self, request: web.Request) -> web.WebSocketResponse:
+        # AUDIT-020: Validate Origin header — only allow localhost connections
+        origin = request.headers.get("Origin", "")
+        if origin:
+            # Strip port from origin for comparison
+            origin_base = origin.rsplit(":", 1)[0] if origin.count(":") > 1 else origin
+            # Allow if origin starts with any allowed prefix
+            allowed = any(
+                origin == allowed or origin.startswith(allowed + ":")
+                for allowed in _ALLOWED_ORIGINS
+            )
+            if not allowed:
+                logging.warning(f"WS connection rejected — disallowed origin: {origin}")
+                raise web.HTTPForbidden(reason="WebSocket origin not allowed")
+
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
         self.state.ws_clients.add(ws)
