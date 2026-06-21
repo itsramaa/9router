@@ -10,11 +10,19 @@ from aiohttp import web, WSMsgType
 
 from .state import ServerState
 
+import os as _os
+
 # AUDIT-006: Bounded send timeout per client — slow clients get disconnected
 _WS_SEND_TIMEOUT = 3.0  # seconds
 
-# AUDIT-020: Allowed WebSocket origins (localhost only)
+# AUDIT-020: Allowed WebSocket origins — configurable via WS_ALLOWED_ORIGINS env var
+# Format: comma-separated origins, e.g. "http://localhost,http://192.168.1.100"
+# Falls back to localhost-only when not set
 _ALLOWED_ORIGINS = {
+    o.strip()
+    for o in _os.getenv("WS_ALLOWED_ORIGINS", "").split(",")
+    if o.strip()
+} or {
     "http://localhost",
     "https://localhost",
     "http://127.0.0.1",
@@ -92,15 +100,16 @@ class WebSocketManager:
             })
 
     async def handle_ws(self, request: web.Request) -> web.WebSocketResponse:
-        # AUDIT-020: Validate Origin header — only allow localhost connections
+        # AUDIT-020: Validate Origin header — only allow configured origins
+        # Skip check if WS_ALLOWED_ORIGINS=* (Docker/self-hosted mode)
+        _origins_env = _os.getenv("WS_ALLOWED_ORIGINS", "")
+        skip_origin_check = _origins_env.strip() == "*"
+
         origin = request.headers.get("Origin", "")
-        if origin:
-            # Strip port from origin for comparison
-            origin_base = origin.rsplit(":", 1)[0] if origin.count(":") > 1 else origin
-            # Allow if origin starts with any allowed prefix
+        if origin and not skip_origin_check:
             allowed = any(
-                origin == allowed or origin.startswith(allowed + ":")
-                for allowed in _ALLOWED_ORIGINS
+                origin == o or origin.startswith(o + ":")
+                for o in _ALLOWED_ORIGINS
             )
             if not allowed:
                 logging.warning(f"WS connection rejected — disallowed origin: {origin}")
