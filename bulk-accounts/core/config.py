@@ -24,14 +24,12 @@ class Config:
             "log_only": False,
         },
         # # 1. Google AI Studio
-        # "gemini": {
-        #     "module": "harvest.google_ai_studio",
-        #     "fn": "harvest",
-        #     "display": "Google AI Studio (Gemini)",
-        #     "log_only": False,
-        #     "auth_type": "apikey",
-        #     "key_field": "apiKey",
-        # },
+        "gemini": {
+            "module": "harvest.google_ai_studio",
+            "fn": "harvest",
+            "display": "Google AI Studio (Gemini)",
+            "log_only": False,
+        },
         # 2. Local dashboard providers (log_only — OAuth completed inside 9router UI)
         # "antigravity": {
         #     "module": "harvest.antigravity",

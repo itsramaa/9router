@@ -41,9 +41,11 @@ _WIN_PGROUP = (
 # AUDIT-019: Simple in-memory rate limiter for harvest start/stop
 # Max 5 requests per 60 seconds per IP
 import time as _time
+
 _RATE_LIMIT_MAX = 5
 _RATE_LIMIT_WINDOW = 60  # seconds
 _rate_buckets: dict[str, list[float]] = {}
+
 
 def _check_rate_limit(ip: str) -> bool:
     """Return True if request is allowed, False if rate limited."""
@@ -324,6 +326,8 @@ class ServerHandlers:
             else:
                 cmd += ["--proxy", proxy]
 
+        api_key = str(body.get("api_key", "")).strip()
+
         env = os.environ.copy()
 
         env["PYTHONUNBUFFERED"] = "1"
@@ -331,6 +335,9 @@ class ServerHandlers:
         env["BATCHER_CAMOUFOX_HEADLESS"] = headless_env
 
         env["BATCHER_INTERACTIVE"] = "1"
+
+        if api_key:
+            env["DASHBOARD_API_KEY"] = api_key
 
         self.state.proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -350,6 +357,7 @@ class ServerHandlers:
         if "temp_proxy_file" in locals():
             _proxy_file_ref = temp_proxy_file
             _proc_ref = self.state.proc
+
             async def _cleanup_proxy_file():
                 try:
                     await _proc_ref.wait()
@@ -360,19 +368,22 @@ class ServerHandlers:
                         _proxy_file_ref.unlink(missing_ok=True)
                     except Exception:
                         pass
+
             asyncio.create_task(_cleanup_proxy_file())
 
         self.state.proc_task = asyncio.create_task(
             self.ws_mgr.stream_proc(self.state.proc)
         )
 
-        await self.ws_mgr.broadcast(
-            {
-                "type": "started",
-                "pid": self.state.proc.pid,
-                "message": f"Harvest started (concurrent={concurrent}, providers={providers})",
-            }
-        )
+        started_payload = {
+            "type": "started",
+            "pid": self.state.proc.pid,
+            "concurrent": concurrent,
+            "providers": providers,
+            "message": f"Harvest started (concurrent={concurrent}, providers={providers})",
+        }
+        self.state.on_started(started_payload)
+        await self.ws_mgr.broadcast(started_payload)
 
         return web.json_response({"ok": True, "pid": self.state.proc.pid})
 

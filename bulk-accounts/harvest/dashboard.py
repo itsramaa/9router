@@ -29,6 +29,10 @@ from .utils import click_first_visible, fill_first_visible, safe_goto
 def _headers(provider: str) -> dict:
     h = {"Content-Type": "application/json"}
     h["Referer"] = f"http://localhost:20128/dashboard/providers/{provider}"
+    # Send API key for 9router auth guard (bypasses JWT cookie requirement)
+    api_key = os.environ.get("DASHBOARD_API_KEY", "").strip()
+    if api_key:
+        h["Authorization"] = f"Bearer {api_key}"
     return h
 
 

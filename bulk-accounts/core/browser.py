@@ -62,19 +62,42 @@ class BrowserManager:
             else:
                 _headless_val = False
 
+        # Docker headless: suppress glxtest GPU probe that crashes Camoufox when
+        # no GPU/display is available (glxtest binary missing or No GPUs via PCI).
+        # These env vars are read by Firefox before launch — safe to set process-wide.
+        _is_linux_headless = (
+            sys.platform.startswith("linux") and _headless_val is True
+        )
+        if _is_linux_headless:
+            os.environ.setdefault("MOZ_HEADLESS", "1")
+            os.environ.setdefault("MOZ_DISABLE_CONTENT_SANDBOX", "1")
+            os.environ.setdefault("MOZ_DISABLE_GFX_SANDBOX", "1")
+            os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+            os.environ.setdefault("GALLIUM_DRIVER", "softpipe")
+
+        # Build Firefox user prefs — add GPU/WebGL disable for Docker headless
+        _ff_prefs = {
+            "widget.windows.window_occlusion_tracking.enabled": False,
+            "dom.min_background_timeout_value": 10,
+            "dom.timeout.enable_budget_timer_fallback": False,
+            "dom.suspend_inactive.enabled": False,
+            "network.http.throttle.enable": False,
+        }
+        if _is_linux_headless:
+            _ff_prefs.update({
+                "layers.acceleration.disabled": True,
+                "webgl.disabled": True,
+                "media.hardware-video-decoding.enabled": False,
+                "gfx.canvas.azure.accelerated": False,
+            })
+
         kwargs: dict[str, Any] = {
             "headless": _headless_val,
             "block_webrtc": True,
             "humanize": False,
             "screen": Screen(max_width=1366, max_height=768),
             "window": (1366, 768),
-            "firefox_user_prefs": {
-                "widget.windows.window_occlusion_tracking.enabled": False,
-                "dom.min_background_timeout_value": 10,
-                "dom.timeout.enable_budget_timer_fallback": False,
-                "dom.suspend_inactive.enabled": False,
-                "network.http.throttle.enable": False,
-            },
+            "firefox_user_prefs": _ff_prefs,
         }
 
         if proxy_url:
