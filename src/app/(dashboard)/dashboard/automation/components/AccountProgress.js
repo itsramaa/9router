@@ -43,7 +43,7 @@ export default function AccountProgress({ accounts }) {
         <h2 className="text-sm font-semibold text-text-main">Account Progress</h2>
         <span className="px-1.5 py-0.5 rounded-full bg-primary/10 text-primary text-[11px] font-semibold">{accounts.length}</span>
       </div>
-      <div className="divide-y divide-border-subtle">
+      <div className="divide-y divide-border-subtle max-h-[400px] overflow-y-auto custom-scrollbar">
         {accounts.map((acc) => {
           const st = ACCOUNT_STATUS_STYLES[acc.status] ?? ACCOUNT_STATUS_STYLES.pending;
           return (

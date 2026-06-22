@@ -1,5 +1,6 @@
 'use client';
 
+import { useState, useEffect, useRef } from 'react';
 import { cn } from '@/shared/utils/cn';
 
 const ALL_PROVIDERS = [
@@ -42,7 +43,29 @@ const DISPLAY_MODES = [
 ];
 
 export default function ConfigPanel({ config, onChange }) {
-  const { providers, concurrent, proxy, displayMode = 'headless' } = config;
+  const { providers, concurrent, proxy, displayMode = 'headless', apiKey = '' } = config;
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [availableKeys, setAvailableKeys] = useState([]);
+  const [showKeyDropdown, setShowKeyDropdown] = useState(false);
+  const dropdownRef = useRef(null);
+
+  useEffect(() => {
+    fetch('/api/keys')
+      .then((r) => r.ok ? r.json() : { keys: [] })
+      .then((data) => setAvailableKeys(Array.isArray(data.keys) ? data.keys : []))
+      .catch(() => { });
+  }, []);
+
+  useEffect(() => {
+    if (!showKeyDropdown) return;
+    function handleClick(e) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
+        setShowKeyDropdown(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [showKeyDropdown]);
 
   function toggleProvider(id) {
     onChange({
@@ -161,6 +184,82 @@ export default function ConfigPanel({ config, onChange }) {
             placeholder="http://user:pass@host:port"
             className="w-full text-xs font-mono bg-surface-2 border border-border-subtle rounded-lg px-3 py-2 text-text-main placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-primary/40"
           />
+        </div>
+
+        {/* Dashboard API Key */}
+
+        <div>
+          <label className="text-xs font-semibold text-text-muted uppercase tracking-wider block mb-1.5">
+            Dashboard API Key
+          </label>
+
+          <div className="relative" ref={dropdownRef}>
+            <div className="flex gap-1.5">
+              <div className="relative flex-1">
+                <input
+                  type={showApiKey ? 'text' : 'password'}
+                  value={apiKey}
+                  onChange={(e) => onChange({ ...config, apiKey: e.target.value })}
+                  onFocus={() => availableKeys.length > 0 && setShowKeyDropdown(true)}
+                  placeholder="sk-… (from Settings → API Keys)"
+                  className="w-full text-xs font-mono bg-surface-2 border border-border-subtle rounded-lg px-3 py-2 pr-8 text-text-main placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-primary/40"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowApiKey((v) => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-main"
+                  tabIndex={-1}
+                >
+                  <span className="material-symbols-outlined text-[15px]">
+                    {showApiKey ? 'visibility_off' : 'visibility'}
+                  </span>
+                </button>
+              </div>
+
+              {apiKey && (
+                <button
+                  type="button"
+                  onClick={() => onChange({ ...config, apiKey: '' })}
+                  className="px-2 rounded-lg bg-surface-2 border border-border-subtle text-text-muted hover:text-red-500 transition-colors"
+                  title="Clear API key"
+                >
+                  <span className="material-symbols-outlined text-[15px]">close</span>
+                </button>
+              )}
+            </div>
+
+            {/* Dropdown: pick from existing API keys */}
+            {showKeyDropdown && availableKeys.length > 0 && (
+              <div className="absolute top-full mt-1 left-0 right-0 z-50 bg-surface border border-border-subtle rounded-lg shadow-lg overflow-hidden">
+                <div className="px-3 py-1.5 text-[10px] text-text-muted border-b border-border-subtle">
+                  Select an existing API key
+                </div>
+                <div className="max-h-40 overflow-y-auto">
+                  {availableKeys.map((k, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => {
+                        onChange({ ...config, apiKey: k.key ?? k });
+                        setShowKeyDropdown(false);
+                      }}
+                      className="w-full text-left px-3 py-2 text-xs font-mono text-text-main hover:bg-surface-2 truncate"
+                    >
+                      {k.name && <span className="text-primary mr-2">{k.name}</span>}
+                      {(k.key ?? k).slice(0, 12)}…
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <p className="mt-1.5 text-[10px] text-text-muted">
+            Used to authenticate harvest results to the 9router dashboard. Generate in{' '}
+            <a href="/dashboard/profile" className="text-primary hover:underline">
+              Settings → API Keys
+            </a>.
+          </p>
         </div>
 
         {/* Display Mode */}

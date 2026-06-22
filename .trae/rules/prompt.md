@@ -1,18 +1,4 @@
----
-trigger: always_on
----
-
-# Antigravity Master Rules
-
-@rules/\_shared.md
-
----
-
-## Cold-Start
-
-1. Read `@rules/_shared.md` — skills, voice, safeguards, memory, protocols
-2. Read subagents from `.agent/rules/*.md`
-3. Scan skills from `~/.gemini/antigravity-ide/skills/`
+# Trae Master Rules (PM-First Workflow)
 
 ---
 
@@ -26,6 +12,11 @@ trigger: always_on
 - `/openspec:proposal`
 - validate → apply → verify → archive
 
+Execution:
+
+- backend → frontend → QA → DevOps
+- QA gate wajib sebelum lanjut
+
 ---
 
 ## 2. WORKFLOW RULES
@@ -34,19 +25,13 @@ trigger: always_on
 - PRD + OpenSpec wajib sebelum implementasi
 - No scope creep tanpa approval
 
-### Execution Flow
-
-- Order: backend → frontend → QA → DevOps
-- QA gate wajib sebelum lanjut ke tahap berikutnya
-- Cross-domain changes wajib via OpenSpec planning
-
 ---
 
 ## 3. OPEN SPEC RULE (CORE)
 
-[Root directory](../openspec/)
-[Source of truth](../openspec/specs/)
-[Proposal & Working changes](../openspec/changes/<feature>/)
+[Root directory](openspec/)
+[Source of truth](openspec/specs/)
+[Proposal & Working changes](openspec/changes/<feature>/)
 
 Inside change:
 
@@ -137,10 +122,9 @@ Sebelum done:
 
 ## 11. MEMORY PATHS
 
-- [Learning](`C:\Users\Holycan.gemini\antigravity-ide\learning`)
-- [Memory](`C:\Users\Holycan.gemini\antigravity-ide\memory`)
-- [Rules](`C:\Users\Holycan.gemini\antigravity-ide\rules`)
-- [Skills](`C:\Users\Holycan.gemini\antigravity-ide\skills`)
+- [Learning](`~/.trae/learning`)
+- [Memory](`~/.trae/memory`)
+- [Rules](`~/.trae/rules`)
 
 ---
 

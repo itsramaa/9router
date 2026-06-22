@@ -1,4 +1,5 @@
 """WebSocket handler & subprocess streaming."""
+
 from __future__ import annotations
 
 import asyncio
@@ -19,21 +20,23 @@ _WS_SEND_TIMEOUT = 3.0  # seconds
 # Format: comma-separated origins, e.g. "http://localhost,http://192.168.1.100"
 # Falls back to localhost-only when not set
 _ALLOWED_ORIGINS = {
-    o.strip()
-    for o in _os.getenv("WS_ALLOWED_ORIGINS", "").split(",")
-    if o.strip()
+    o.strip() for o in _os.getenv("WS_ALLOWED_ORIGINS", "").split(",") if o.strip()
 } or {
     "http://localhost",
     "https://localhost",
     "http://127.0.0.1",
     "https://127.0.0.1",
+    "http://0.0.0.0",
+    "https://0.0.0.0",
 }
 
 
 class WebSocketManager:
     def __init__(self, state: ServerState):
         self.state = state
-        self._pending_tasks: set = set()  # BUG-034: store refs to prevent task leak warnings
+        self._pending_tasks: set = (
+            set()
+        )  # BUG-034: store refs to prevent task leak warnings
 
     async def broadcast(self, msg: dict) -> None:
         if not self.state.ws_clients:
@@ -74,30 +77,61 @@ class WebSocketManager:
                     if data.get("type") == "frame":
                         await self.broadcast(data)
                         continue
+                    # Update slot/account state from progress events
+                    self._update_state_from_msg(data)
+                    self.state.push_log(data)
                     await self.broadcast(data)
                 except json.JSONDecodeError:
                     # Plain text line — strip any leading slot prefix like "4]" or "[1]"
                     stripped = raw
-                    stripped = re.sub(r'^\[?\d+\]?\s*', '', stripped, count=1)
+                    stripped = re.sub(r"^\[?\d+\]?\s*", "", stripped, count=1)
                     # BUG-035 fix: check raw line before strip for frame type patterns
                     if '"type"' in raw and ('"frame"' in raw or '"base64"' in raw):
                         continue
                     # Skip if stripped version looks like frame JSON
-                    if '"type"' in stripped and ('"frame"' in stripped or '"base64"' in stripped):
+                    if '"type"' in stripped and (
+                        '"frame"' in stripped or '"base64"' in stripped
+                    ):
                         continue
                     # Skip raw base64 blobs (long strings with no spaces/braces)
-                    if len(stripped) > 300 and not any(c in stripped for c in ('{', '}', ' ')):
+                    if len(stripped) > 300 and not any(
+                        c in stripped for c in ("{", "}", " ")
+                    ):
                         continue
-                    await self.broadcast({"type": "log", "message": raw})
+                    msg = {"type": "log", "message": raw}
+                    self.state.push_log(msg)
+                    await self.broadcast(msg)
         except Exception as _e:
-            logging.warning(f'Swallowed exception: {_e}')
+            logging.warning(f"Swallowed exception: {_e}")
         finally:
             await proc.wait()
-            await self.broadcast({
+            done_msg = {
                 "type": "done_stream",
                 "returncode": proc.returncode,
                 "message": "Harvest process finished",
-            })
+            }
+            self.state.on_stopped()
+            self.state.push_log(done_msg)
+            await self.broadcast(done_msg)
+
+    def _update_state_from_msg(self, data: dict) -> None:
+        """Extract slot/account state from broadcast messages for reconnect replay."""
+        msg_type = data.get("type")
+        # Slot start/done
+        slot = data.get("slot")
+        email = data.get("email")
+        if slot is not None and email:
+            self.state.update_slot(slot, {"email": email, "status": "running"})
+            self.state.update_account(email, {"slot": slot, "status": "running"})
+        # Account done
+        if msg_type == "done" and email:
+            keys = data.get("keys", 0)
+            self.state.update_account(email, {"status": "done", "keys": keys})
+            if slot is not None:
+                self.state.update_slot(slot, {"status": "idle", "email": None})
+        # Account error/skip
+        if msg_type in ("error", "skip") and email:
+            self.state.update_account(email, {"status": msg_type})
 
     async def handle_ws(self, request: web.Request) -> web.WebSocketResponse:
         # AUDIT-020: Validate Origin header — only allow configured origins
@@ -108,8 +142,7 @@ class WebSocketManager:
         origin = request.headers.get("Origin", "")
         if origin and not skip_origin_check:
             allowed = any(
-                origin == o or origin.startswith(o + ":")
-                for o in _ALLOWED_ORIGINS
+                origin == o or origin.startswith(o + ":") for o in _ALLOWED_ORIGINS
             )
             if not allowed:
                 logging.warning(f"WS connection rejected — disallowed origin: {origin}")
@@ -119,8 +152,8 @@ class WebSocketManager:
         await ws.prepare(request)
         self.state.ws_clients.add(ws)
         try:
-            is_running = self.state.proc is not None and self.state.proc.returncode is None
-            await ws.send_str(json.dumps({"type": "connected", "running": is_running}))
+            # Send full reconnect state so client can restore UI after page refresh
+            await ws.send_str(json.dumps(self.state.get_reconnect_payload()))
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
                     try:
@@ -128,7 +161,7 @@ class WebSocketManager:
                         if data.get("type") == "ping":
                             await ws.send_str(json.dumps({"type": "pong"}))
                     except Exception as _e:
-                        logging.warning(f'Swallowed exception: {_e}')
+                        logging.warning(f"Swallowed exception: {_e}")
                 elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSE):
                     break
         finally:

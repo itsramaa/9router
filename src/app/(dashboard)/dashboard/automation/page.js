@@ -33,6 +33,8 @@ const DEFAULT_CONFIG = {
   proxy: '',
 
   displayMode: 'headless',
+
+  apiKey: '',
 };
 
 const MAX_LOG = 500;
@@ -201,9 +203,56 @@ export default function AutomationPage() {
     (msg) => {
       // ── System messages ───────────────────────────────────────────────
 
-      if (msg.type === 'connected') {
-        // WS reconnected — sync runState if server says harvest is not running
+      if (msg.type === 'reconnect_state') {
+        // Full state snapshot sent by server on every WS connect/reconnect.
+        // Restores UI after page refresh or tab switch.
+        setRunState(msg.running ? 'running' : 'idle');
 
+        // Restore slot states
+        if (msg.slots && Object.keys(msg.slots).length > 0) {
+          const restoredSlots = Object.entries(msg.slots).map(([idx, s]) => ({
+            index: Number(idx),
+            email: s.email ?? '',
+            provider: '',
+            message: '',
+            status: s.status ?? 'running',
+          }));
+          setSlots(restoredSlots);
+        }
+
+        // Restore account progress
+        if (msg.accounts && Object.keys(msg.accounts).length > 0) {
+          setAccountProgress((prev) => {
+            const restored = { ...prev };
+            for (const [email, data] of Object.entries(msg.accounts)) {
+              restored[email] = {
+                email,
+                slot: data.slot,
+                status: data.status ?? 'running',
+                steps: [],
+                currentMessage: '',
+                ...data,
+              };
+            }
+            return restored;
+          });
+        }
+
+        // Replay log buffer
+        if (Array.isArray(msg.log_buffer) && msg.log_buffer.length > 0) {
+          setLogEntries(msg.log_buffer.map((e) => ({ ...e, ts: e.ts ?? ts() })));
+        }
+
+        // Restore concurrent from session config
+        if (msg.session?.concurrent) {
+          setConfig((prev) => ({ ...prev, concurrent: msg.session.concurrent }));
+        }
+
+        return;
+      }
+
+      if (msg.type === 'connected') {
+        // Legacy fallback — server still running old code without reconnect_state
         if (!msg.running)
           setRunState((prev) => (prev === 'running' ? 'idle' : prev));
 
@@ -722,6 +771,8 @@ export default function AutomationPage() {
           proxy: config.proxy || undefined,
 
           display_mode: config.displayMode,
+
+          api_key: config.apiKey || undefined,
         }),
       });
 

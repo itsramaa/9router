@@ -60,6 +60,68 @@ export default function ProfilePage() {
   const [proxyLoading, setProxyLoading] = useState(false);
   const [proxyTestLoading, setProxyTestLoading] = useState(false);
 
+  // API Keys state
+  const [apiKeys, setApiKeys] = useState([]);
+  const [apiKeyName, setApiKeyName] = useState("");
+  const [apiKeyLoading, setApiKeyLoading] = useState(false);
+  const [apiKeyStatus, setApiKeyStatus] = useState({ type: "", message: "" });
+  const [newKeyValue, setNewKeyValue] = useState("");
+  const [copiedKeyId, setCopiedKeyId] = useState(null);
+
+  useEffect(() => {
+    fetch("/api/keys")
+      .then((r) => r.ok ? r.json() : { keys: [] })
+      .then((data) => setApiKeys(Array.isArray(data.keys) ? data.keys : []))
+      .catch(() => { });
+  }, []);
+
+  const handleCreateApiKey = async (e) => {
+    e.preventDefault();
+    const name = apiKeyName.trim();
+    if (!name) return;
+    setApiKeyLoading(true);
+    setApiKeyStatus({ type: "", message: "" });
+    setNewKeyValue("");
+    try {
+      const res = await fetch("/api/keys", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setApiKeys((prev) => [...prev, data]);
+        setNewKeyValue(data.key);
+        setApiKeyName("");
+        setApiKeyStatus({ type: "success", message: "API key created — copy it now, it won't be shown again." });
+      } else {
+        setApiKeyStatus({ type: "error", message: data.error || "Failed to create key" });
+      }
+    } catch {
+      setApiKeyStatus({ type: "error", message: "An error occurred" });
+    } finally {
+      setApiKeyLoading(false);
+    }
+  };
+
+  const handleDeleteApiKey = async (id) => {
+    try {
+      const res = await fetch(`/api/keys/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setApiKeys((prev) => prev.filter((k) => k.id !== id));
+        if (newKeyValue) setNewKeyValue("");
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleCopyKey = (key, id) => {
+    navigator.clipboard.writeText(key).catch(() => { });
+    setCopiedKeyId(id);
+    setTimeout(() => setCopiedKeyId(null), 2000);
+  };
+
   useEffect(() => {
     setLocale(getLocaleFromCookie());
   }, [langOpen]);
@@ -755,6 +817,100 @@ export default function ProfilePage() {
           </div>
         </Card>
 
+        {/* API Keys */}
+        <Card>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="p-2 rounded-lg bg-amber-500/10 text-amber-500 shrink-0">
+              <span className="material-symbols-outlined text-[20px]">key</span>
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="text-base sm:text-lg font-semibold">API Keys</h3>
+              <p className="text-xs text-text-muted">
+                Use API keys to authenticate programmatic access (e.g. bulk-accounts automation).
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-4">
+            {/* Create new key */}
+            <form onSubmit={handleCreateApiKey} className="flex gap-2">
+              <Input
+                type="text"
+                placeholder="Key name (e.g. bulk-accounts)"
+                value={apiKeyName}
+                onChange={(e) => setApiKeyName(e.target.value)}
+                className="flex-1"
+              />
+              <Button type="submit" variant="primary" loading={apiKeyLoading} disabled={!apiKeyName.trim()}>
+                Generate
+              </Button>
+            </form>
+
+            {/* Newly created key — show once */}
+            {newKeyValue && (
+              <div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20">
+                <span className="material-symbols-outlined text-green-500 text-[18px] shrink-0">check_circle</span>
+                <code className="flex-1 text-xs font-mono text-green-600 dark:text-green-400 break-all">{newKeyValue}</code>
+                <button
+                  type="button"
+                  onClick={() => handleCopyKey(newKeyValue, "new")}
+                  className="shrink-0 text-green-600 hover:text-green-700 dark:text-green-400"
+                  title="Copy key"
+                >
+                  <span className="material-symbols-outlined text-[18px]">
+                    {copiedKeyId === "new" ? "check" : "content_copy"}
+                  </span>
+                </button>
+              </div>
+            )}
+
+            {apiKeyStatus.message && (
+              <p className={`text-xs ${apiKeyStatus.type === "error" ? "text-red-500" : "text-green-500"}`}>
+                {apiKeyStatus.message}
+              </p>
+            )}
+
+            {/* Existing keys list */}
+            {apiKeys.length > 0 && (
+              <div className="flex flex-col gap-2 pt-2 border-t border-border/50">
+                {apiKeys.map((k) => (
+                  <div key={k.id} className="flex items-center gap-3 p-2.5 rounded-lg bg-surface-2 border border-border-subtle">
+                    <span className="material-symbols-outlined text-[16px] text-text-muted shrink-0">key</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium truncate">{k.name}</p>
+                      <p className="text-[11px] font-mono text-text-muted truncate">
+                        {k.key ? `${k.key.slice(0, 14)}…` : "sk-…"}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyKey(k.key, k.id)}
+                      className="shrink-0 text-text-muted hover:text-text-main transition-colors"
+                      title="Copy key"
+                    >
+                      <span className="material-symbols-outlined text-[16px]">
+                        {copiedKeyId === k.id ? "check" : "content_copy"}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteApiKey(k.id)}
+                      className="shrink-0 text-text-muted hover:text-red-500 transition-colors"
+                      title="Revoke key"
+                    >
+                      <span className="material-symbols-outlined text-[16px]">delete</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {apiKeys.length === 0 && !newKeyValue && (
+              <p className="text-xs text-text-muted text-center py-2">No API keys yet.</p>
+            )}
+          </div>
+        </Card>
+
         {/* OIDC */}
         <Card>
           <button
@@ -776,145 +932,145 @@ export default function ProfilePage() {
             </span>
           </button>
           {oidcExpanded && (
-          <div className="flex flex-col gap-4 mt-4">
-            <p className="text-xs sm:text-sm text-text-muted">
-              Use Authentik or any OIDC provider to sign in to the dashboard. You can enable password-only, OIDC-only, or both for the dashboard; model API access still uses API keys.
-            </p>
-
-            <div className="flex flex-col gap-2">
-              <label className="font-medium text-sm sm:text-base">Auth Mode</label>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                {[
-                  {
-                    value: "password",
-                    title: "Password only",
-                    desc: "Keep the legacy password login.",
-                  },
-                  {
-                    value: "oidc",
-                    title: "OIDC only",
-                    desc: "Require OIDC for dashboard access.",
-                  },
-                  {
-                    value: "both",
-                    title: "Both",
-                    desc: "Allow either password or OIDC.",
-                  },
-                ].map((option) => {
-                  const active = oidcForm.authMode === option.value;
-                  return (
-                    <button
-                      key={option.value}
-                      type="button"
-                      onClick={() => updateOidcForm("authMode", option.value)}
-                      className={cn(
-                        "text-left rounded-lg border p-3 transition-colors",
-                        active
-                          ? "border-primary bg-primary/5"
-                          : "border-border bg-bg hover:bg-black/5 dark:hover:bg-white/5"
-                      )}
-                      disabled={loading || oidcLoading}
-                    >
-                      <p className="font-medium text-sm sm:text-base">{option.title}</p>
-                      <p className="text-xs sm:text-sm text-text-muted mt-1">{option.desc}</p>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-4">
-              <div className="flex flex-col gap-2">
-                <label className="font-medium text-sm sm:text-base">Issuer URL</label>
-                <Input
-                  placeholder="https://auth.example.com/application/o/9router/"
-                  value={oidcForm.oidcIssuerUrl}
-                  onChange={(e) => updateOidcForm("oidcIssuerUrl", e.target.value)}
-                  disabled={loading || oidcLoading}
-                />
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <label className="font-medium text-sm sm:text-base">Client ID</label>
-                <Input
-                  placeholder="9router-dashboard"
-                  value={oidcForm.oidcClientId}
-                  onChange={(e) => updateOidcForm("oidcClientId", e.target.value)}
-                  disabled={loading || oidcLoading}
-                />
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <label className="font-medium text-sm sm:text-base">Client Secret</label>
-                <Input
-                  type="password"
-                  placeholder="Leave blank to keep existing secret"
-                  value={oidcClientSecret}
-                  onChange={(e) => setOidcClientSecret(e.target.value)}
-                  disabled={loading || oidcLoading}
-                />
-                <p className="text-xs sm:text-sm text-text-muted">This value is write-only after saving.</p>
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <label className="font-medium text-sm sm:text-base">Scopes</label>
-                <Input
-                  placeholder="openid profile email"
-                  value={oidcForm.oidcScopes}
-                  onChange={(e) => updateOidcForm("oidcScopes", e.target.value)}
-                  disabled={loading || oidcLoading}
-                />
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <label className="font-medium text-sm sm:text-base">Login Button Label</label>
-                <Input
-                  placeholder="Sign in with OIDC"
-                  value={oidcForm.oidcLoginLabel}
-                  onChange={(e) => updateOidcForm("oidcLoginLabel", e.target.value)}
-                  disabled={loading || oidcLoading}
-                />
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-border bg-bg p-3 text-xs sm:text-sm text-text-muted">
-              <p className="font-medium text-text-main mb-1">Redirect URI</p>
-              <code className="block break-all font-mono">{oidcRedirectUri}</code>
-            </div>
-
-            <div className="flex flex-col sm:flex-row gap-2 pt-2 border-t border-border/50">
-              <Button type="button" variant="primary" loading={oidcLoading} onClick={() => saveOidcSettings()} className="w-full sm:w-auto">
-                Save auth mode
-              </Button>
-              <Button type="button" variant="outline" loading={oidcTestLoading} onClick={testOidcConnection} className="w-full sm:w-auto">
-                Test connection
-              </Button>
-            </div>
-
-            {oidcTestStatus.message && (
-              <p className={`text-xs sm:text-sm ${oidcTestStatus.type === "error" ? "text-red-500" : "text-green-500"}`}>
-                {oidcTestStatus.message}
+            <div className="flex flex-col gap-4 mt-4">
+              <p className="text-xs sm:text-sm text-text-muted">
+                Use Authentik or any OIDC provider to sign in to the dashboard. You can enable password-only, OIDC-only, or both for the dashboard; model API access still uses API keys.
               </p>
-            )}
 
-            {oidcStatus.message && (
-              <p className={`text-xs sm:text-sm ${oidcStatus.type === "error" ? "text-red-500" : "text-green-500"}`}>
-                {oidcStatus.message}
-              </p>
-            )}
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm sm:text-base">Auth Mode</label>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {[
+                    {
+                      value: "password",
+                      title: "Password only",
+                      desc: "Keep the legacy password login.",
+                    },
+                    {
+                      value: "oidc",
+                      title: "OIDC only",
+                      desc: "Require OIDC for dashboard access.",
+                    },
+                    {
+                      value: "both",
+                      title: "Both",
+                      desc: "Allow either password or OIDC.",
+                    },
+                  ].map((option) => {
+                    const active = oidcForm.authMode === option.value;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => updateOidcForm("authMode", option.value)}
+                        className={cn(
+                          "text-left rounded-lg border p-3 transition-colors",
+                          active
+                            ? "border-primary bg-primary/5"
+                            : "border-border bg-bg hover:bg-black/5 dark:hover:bg-white/5"
+                        )}
+                        disabled={loading || oidcLoading}
+                      >
+                        <p className="font-medium text-sm sm:text-base">{option.title}</p>
+                        <p className="text-xs sm:text-sm text-text-muted mt-1">{option.desc}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
-            {settings.authMode === "oidc" && (
-              <p className="text-xs sm:text-sm text-amber-600 dark:text-amber-400">
-                OIDC login is currently active. Password login is disabled until you switch back.
-              </p>
-            )}
+              <div className="grid grid-cols-1 gap-4">
+                <div className="flex flex-col gap-2">
+                  <label className="font-medium text-sm sm:text-base">Issuer URL</label>
+                  <Input
+                    placeholder="https://auth.example.com/application/o/9router/"
+                    value={oidcForm.oidcIssuerUrl}
+                    onChange={(e) => updateOidcForm("oidcIssuerUrl", e.target.value)}
+                    disabled={loading || oidcLoading}
+                  />
+                </div>
 
-            {settings.authMode === "both" && (
-              <p className="text-xs sm:text-sm text-amber-600 dark:text-amber-400">
-                Password and OIDC login are both active.
-              </p>
-            )}
-          </div>
+                <div className="flex flex-col gap-2">
+                  <label className="font-medium text-sm sm:text-base">Client ID</label>
+                  <Input
+                    placeholder="9router-dashboard"
+                    value={oidcForm.oidcClientId}
+                    onChange={(e) => updateOidcForm("oidcClientId", e.target.value)}
+                    disabled={loading || oidcLoading}
+                  />
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <label className="font-medium text-sm sm:text-base">Client Secret</label>
+                  <Input
+                    type="password"
+                    placeholder="Leave blank to keep existing secret"
+                    value={oidcClientSecret}
+                    onChange={(e) => setOidcClientSecret(e.target.value)}
+                    disabled={loading || oidcLoading}
+                  />
+                  <p className="text-xs sm:text-sm text-text-muted">This value is write-only after saving.</p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <label className="font-medium text-sm sm:text-base">Scopes</label>
+                  <Input
+                    placeholder="openid profile email"
+                    value={oidcForm.oidcScopes}
+                    onChange={(e) => updateOidcForm("oidcScopes", e.target.value)}
+                    disabled={loading || oidcLoading}
+                  />
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <label className="font-medium text-sm sm:text-base">Login Button Label</label>
+                  <Input
+                    placeholder="Sign in with OIDC"
+                    value={oidcForm.oidcLoginLabel}
+                    onChange={(e) => updateOidcForm("oidcLoginLabel", e.target.value)}
+                    disabled={loading || oidcLoading}
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-border bg-bg p-3 text-xs sm:text-sm text-text-muted">
+                <p className="font-medium text-text-main mb-1">Redirect URI</p>
+                <code className="block break-all font-mono">{oidcRedirectUri}</code>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-2 pt-2 border-t border-border/50">
+                <Button type="button" variant="primary" loading={oidcLoading} onClick={() => saveOidcSettings()} className="w-full sm:w-auto">
+                  Save auth mode
+                </Button>
+                <Button type="button" variant="outline" loading={oidcTestLoading} onClick={testOidcConnection} className="w-full sm:w-auto">
+                  Test connection
+                </Button>
+              </div>
+
+              {oidcTestStatus.message && (
+                <p className={`text-xs sm:text-sm ${oidcTestStatus.type === "error" ? "text-red-500" : "text-green-500"}`}>
+                  {oidcTestStatus.message}
+                </p>
+              )}
+
+              {oidcStatus.message && (
+                <p className={`text-xs sm:text-sm ${oidcStatus.type === "error" ? "text-red-500" : "text-green-500"}`}>
+                  {oidcStatus.message}
+                </p>
+              )}
+
+              {settings.authMode === "oidc" && (
+                <p className="text-xs sm:text-sm text-amber-600 dark:text-amber-400">
+                  OIDC login is currently active. Password login is disabled until you switch back.
+                </p>
+              )}
+
+              {settings.authMode === "both" && (
+                <p className="text-xs sm:text-sm text-amber-600 dark:text-amber-400">
+                  Password and OIDC login are both active.
+                </p>
+              )}
+            </div>
           )}
         </Card>
 
