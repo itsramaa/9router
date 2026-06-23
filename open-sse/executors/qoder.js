@@ -112,7 +112,7 @@ function stableChatRecordId(model, messages, tools, maxTokens) {
   }
   if (tools) {
     h.update("\0");
-    try { h.update(JSON.stringify(tools)); } catch {}
+    try { h.update(JSON.stringify(tools)); } catch { }
   }
   h.update(`\0mt=${maxTokens}`);
   return h.digest("hex").slice(0, 16);
@@ -127,7 +127,7 @@ function truncate(s, n) {
  */
 async function buildQoderRequestBody({ model, body, credentials, log, proxyOptions, signal }) {
   const qoderKey = String(model || "").replace(/^qoder\//, "");
-  
+
   // Fetch model config from dynamic API instead of relying on static QODER_MODEL_MAP.
   // This allows support for new Qoder models (e.g., qmodel_latest) without code changes.
   let modelConfig = await getQoderModelConfig(credentials, qoderKey, { log, proxyOptions, signal });
@@ -429,6 +429,96 @@ export class QoderExecutor extends BaseExecutor {
     if (!response.ok) {
       // Pass error response through unchanged so chatCore can capture it.
       return { response, url, headers, transformedBody: payload };
+    }
+
+    // BUG FIX: Qoder returns HTTP 200 even for quota/auth errors, encoding
+    // the real status in the SSE envelope's statusCodeValue field.
+    // Previously wrapQoderSSE injected errors as chat content text, which
+    // made chatCore see success=true → no fallback, no account pause.
+    //
+    // Fix: peek at the first SSE line before streaming. If statusCodeValue
+    // indicates an error, return a proper non-ok HTTP response so chatCore
+    // triggers markAccountUnavailable and fallback to the next account.
+    if (response.body) {
+      const reader = response.body.getReader();
+      let firstChunk;
+      try {
+        const { value, done } = await reader.read();
+        firstChunk = done ? null : value;
+      } catch {
+        firstChunk = null;
+      }
+
+      if (firstChunk) {
+        const text = new TextDecoder().decode(firstChunk);
+        // Try to extract first SSE data line
+        const firstDataMatch = text.match(/data:\s*({.+})/);
+        if (firstDataMatch) {
+          try {
+            const envelope = JSON.parse(firstDataMatch[1]);
+            const statusVal = typeof envelope.statusCodeValue === "number"
+              ? envelope.statusCodeValue
+              : 200;
+            if (statusVal !== 200) {
+              // Parse error message from nested body
+              let msg = `Qoder upstream error ${statusVal}`;
+              const inner = typeof envelope.body === "string" ? envelope.body : "";
+              try {
+                const innerParsed = JSON.parse(inner);
+                if (innerParsed && typeof innerParsed === "object") {
+                  if (typeof innerParsed.message === "string") {
+                    try {
+                      const msgParsed = JSON.parse(innerParsed.message);
+                      msg = msgParsed?.pricingUrl
+                        ? `Quota limit reached. Upgrade at: ${msgParsed.pricingUrl}`
+                        : innerParsed.message;
+                    } catch {
+                      msg = innerParsed.message;
+                    }
+                  } else if (typeof innerParsed.pricingUrl === "string") {
+                    msg = `Quota limit reached. Upgrade at: ${innerParsed.pricingUrl}`;
+                  }
+                }
+              } catch { /* keep default msg */ }
+              reader.cancel();
+              const errResp = new Response(
+                JSON.stringify({ error: { message: msg } }),
+                {
+                  status: statusVal === 403 || statusVal === 401 ? statusVal : 402,
+                  headers: { "Content-Type": "application/json" }
+                },
+              );
+              return { response: errResp, url, headers, transformedBody: payload };
+            }
+          } catch { /* not valid JSON — proceed normally */ }
+        }
+
+        // No envelope error detected — reconstruct the stream by prepending
+        // the already-read first chunk back before the remaining body.
+        const firstChunkCopy = firstChunk;
+        const remainingStream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(firstChunkCopy);
+          },
+          pull(controller) {
+            return reader.read().then(({ value, done }) => {
+              if (done) controller.close();
+              else controller.enqueue(value);
+            });
+          },
+          cancel(reason) {
+            reader.cancel(reason);
+          },
+        });
+        // Build a synthetic Response with the reconstructed stream
+        const reconstructed = new Response(remainingStream, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+        const wrapped = wrapQoderSSE(reconstructed, `qoder/${qoderKey}`);
+        return { response: wrapped, url, headers, transformedBody: payload };
+      }
     }
 
     const wrapped = wrapQoderSSE(response, `qoder/${qoderKey}`);
