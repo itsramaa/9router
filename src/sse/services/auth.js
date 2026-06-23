@@ -42,6 +42,10 @@ import * as log from '../utils/logger.js';
 
 const _authState = (global.__authState ??= {
   selectionMutex: Promise.resolve(),
+  // BUG-014-FIX2: per-provider mutexes to prevent global serialization.
+  // A single global mutex caused ALL providers to queue behind each other —
+  // e.g. a slow qoder credential lookup would block claude/gemini/etc.
+  providerMutexes: new Map(),
 }); // BUG-014 fix
 
 /**
@@ -76,18 +80,19 @@ export async function getProviderCredentials(
 
   const preferredConnectionId = options?.preferredConnectionId || null;
 
-  const currentMutex = _authState.selectionMutex;
+  const providerId = resolveProviderId(provider);
 
+  // BUG-014-FIX2: per-provider mutex instead of global mutex.
+  // Global mutex caused all providers to queue behind each other.
+  // Per-provider mutex only serializes concurrent requests to the SAME provider.
+  const currentMutex = _authState.providerMutexes.get(providerId) || Promise.resolve();
   let resolveMutex;
-
-  _authState.selectionMutex = new Promise((resolve) => {
+  _authState.providerMutexes.set(providerId, new Promise((resolve) => {
     resolveMutex = resolve;
-  });
+  }));
 
   try {
     await currentMutex;
-
-    const providerId = resolveProviderId(provider);
 
     // BUG-7 fix: auto-resume expired pauses before credential selection
     // This ensures expired pauses are immediately available without waiting for scheduler
