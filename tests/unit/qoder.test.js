@@ -453,12 +453,15 @@ describe("wrapQoderSSE", () => {
     expect(() => JSON.parse(dataLine.slice("data: ".length))).not.toThrow();
   });
 
-  it("upstream error envelope produces an error chunk + [DONE]", async () => {
+  it("upstream error envelope closes stream with [DONE] (no error text injected into chat)", async () => {
+    // Behavior change: wrapQoderSSE no longer injects error as chat content.
+    // Error detection now happens in execute() via peek before streaming starts.
+    // Mid-stream errors just close cleanly with [DONE].
     const env = JSON.stringify({ statusCodeValue: 503, body: "service unavailable" });
     const wrapped = wrapQoderSSE(makeResponse([`data: ${env}\n\n`]), "qoder/lite");
     const out = await drain(wrapped);
-    expect(out).toContain("[qoder error 503");
-    expect(out).toContain("data: [DONE]\n\n");
+    expect(out).not.toContain("[qoder error 503");  // no error injected into stream
+    expect(out).toContain("data: [DONE]\n\n");       // stream closed cleanly
   });
 
   it("non-ok responses are returned unchanged (no transform)", () => {

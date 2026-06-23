@@ -252,15 +252,9 @@ function wrapQoderSSE(response, model) {
     const statusVal = typeof envelope.statusCodeValue === "number" ? envelope.statusCodeValue : 200;
     const inner = typeof envelope.body === "string" ? envelope.body : "";
     if (statusVal !== 200) {
-      const msg = inner || `upstream status ${statusVal}`;
-      const errChunk = JSON.stringify({
-        id: `qoder-error-${Date.now()}`,
-        object: "chat.completion.chunk",
-        created: Math.floor(Date.now() / 1000),
-        model,
-        choices: [{ index: 0, delta: { content: `\n[qoder error ${statusVal}: ${truncate(msg, 200)}]` }, finish_reason: "stop" }],
-      });
-      controller.enqueue(encoder.encode(`data: ${errChunk}\n\n`));
+      // Mid-stream error after content already started flowing.
+      // Close stream cleanly — execute() peek handles early errors before content starts.
+      // Do NOT inject error as chat content (that was the original bug).
       controller.enqueue(encoder.encode(SSE_DONE));
       doneEmitted = true;
       return;
@@ -436,31 +430,41 @@ export class QoderExecutor extends BaseExecutor {
     // Previously wrapQoderSSE injected errors as chat content text, which
     // made chatCore see success=true → no fallback, no account pause.
     //
-    // Fix: peek at the first SSE line before streaming. If statusCodeValue
-    // indicates an error, return a proper non-ok HTTP response so chatCore
-    // triggers markAccountUnavailable and fallback to the next account.
+    // Fix: peek at the first complete SSE line before streaming.
+    // Buffer chunks until we find a newline so we always get a complete
+    // JSON envelope regardless of how the upstream splits chunks.
+    // If statusCodeValue != 200, return a proper non-ok HTTP response so
+    // chatCore triggers markAccountUnavailable and fallback to next account.
     if (response.body) {
       const reader = response.body.getReader();
-      let firstChunk;
-      try {
-        const { value, done } = await reader.read();
-        firstChunk = done ? null : value;
-      } catch {
-        firstChunk = null;
-      }
+      const decoder = new TextDecoder();
+      let peekBuf = "";
+      const peekedChunks = [];
+      let firstLineError = null;
 
-      if (firstChunk) {
-        const text = new TextDecoder().decode(firstChunk);
-        // Try to extract first SSE data line
-        const firstDataMatch = text.match(/data:\s*({.+})/);
-        if (firstDataMatch) {
+      // Read chunks until we have at least one complete SSE line (ends with \n)
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          peekedChunks.push(value);
+          peekBuf += decoder.decode(value, { stream: true });
+          if (peekBuf.includes("\n")) break;
+        }
+      } catch { /* stream read failed — fall through to wrapQoderSSE */ }
+
+      // Try to find and parse the first SSE data line
+      const nlIdx = peekBuf.indexOf("\n");
+      if (nlIdx !== -1) {
+        const firstLine = peekBuf.slice(0, nlIdx).trim();
+        if (firstLine.startsWith("data:")) {
+          const data = firstLine.slice(5).trimStart();
           try {
-            const envelope = JSON.parse(firstDataMatch[1]);
+            const envelope = JSON.parse(data);
             const statusVal = typeof envelope.statusCodeValue === "number"
-              ? envelope.statusCodeValue
-              : 200;
+              ? envelope.statusCodeValue : 200;
             if (statusVal !== 200) {
-              // Parse error message from nested body
+              // Parse full error message from nested body
               let msg = `Qoder upstream error ${statusVal}`;
               const inner = typeof envelope.body === "string" ? envelope.body : "";
               try {
@@ -472,9 +476,7 @@ export class QoderExecutor extends BaseExecutor {
                       msg = msgParsed?.pricingUrl
                         ? `Quota limit reached. Upgrade at: ${msgParsed.pricingUrl}`
                         : innerParsed.message;
-                    } catch {
-                      msg = innerParsed.message;
-                    }
+                    } catch { msg = innerParsed.message; }
                   } else if (typeof innerParsed.pricingUrl === "string") {
                     msg = `Quota limit reached. Upgrade at: ${innerParsed.pricingUrl}`;
                   }
@@ -490,35 +492,33 @@ export class QoderExecutor extends BaseExecutor {
               );
               return { response: errResp, url, headers, transformedBody: payload };
             }
-          } catch { /* not valid JSON — proceed normally */ }
+          } catch { /* not valid JSON envelope — proceed normally */ }
         }
-
-        // No envelope error detected — reconstruct the stream by prepending
-        // the already-read first chunk back before the remaining body.
-        const firstChunkCopy = firstChunk;
-        const remainingStream = new ReadableStream({
-          start(controller) {
-            controller.enqueue(firstChunkCopy);
-          },
-          pull(controller) {
-            return reader.read().then(({ value, done }) => {
-              if (done) controller.close();
-              else controller.enqueue(value);
-            });
-          },
-          cancel(reason) {
-            reader.cancel(reason);
-          },
-        });
-        // Build a synthetic Response with the reconstructed stream
-        const reconstructed = new Response(remainingStream, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: response.headers,
-        });
-        const wrapped = wrapQoderSSE(reconstructed, `qoder/${qoderKey}`);
-        return { response: wrapped, url, headers, transformedBody: payload };
       }
+
+      // No error detected — reconstruct stream from peeked chunks + remaining body
+      const peekedChunksCopy = peekedChunks;
+      let peekedIdx = 0;
+      const reconstructed = new ReadableStream({
+        pull(controller) {
+          if (peekedIdx < peekedChunksCopy.length) {
+            controller.enqueue(peekedChunksCopy[peekedIdx++]);
+            return;
+          }
+          return reader.read().then(({ value, done }) => {
+            if (done) controller.close();
+            else controller.enqueue(value);
+          });
+        },
+        cancel(reason) { reader.cancel(reason); },
+      });
+      const reconstructedResp = new Response(reconstructed, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+      const wrapped = wrapQoderSSE(reconstructedResp, `qoder/${qoderKey}`);
+      return { response: wrapped, url, headers, transformedBody: payload };
     }
 
     const wrapped = wrapQoderSSE(response, `qoder/${qoderKey}`);
