@@ -143,12 +143,12 @@
 
 ---
 
-## BUG-T13: Kiro stale Profile ARN ⏳ TODO
+## BUG-T13: Kiro stale Profile ARN ✅ DONE
 
-- [ ] T13-1: ARN validation di `testOAuthConnection` untuk kiro
-- [ ] T13-2: Return error jika ARN invalid
-- [ ] T13-3: `activate()` set `needsArnRefresh: true` jika lastError mengandung 'profile'/'arn'
-- [ ] T13-4: `getProviderCredentials` skip kiro dengan `needsArnRefresh: true`
+- [ ] T13-1: ARN validation di `testOAuthConnection` untuk kiro (deferred — perlu Kiro ARN error untuk test)
+- [ ] T13-2: Return error jika ARN invalid (deferred)
+- [x] T13-3: `activate()` set `needsArnRefresh: true` jika lastError mengandung 'profile'/'arn'
+- [x] T13-4: `getProviderCredentials` skip kiro dengan `needsArnRefresh: true`
 
 ---
 
@@ -185,12 +185,12 @@
 
 ---
 
-## INKON-05: clearAccountError pakai snapshot lama ⏳ TODO
+## INKON-05: clearAccountError pakai snapshot lama ✅ DONE
 
-- [ ] INKON05-1: Ganti `_connection` snapshot dengan fresh `getProviderConnectionById` read
-- [ ] INKON05-2: Pastikan import tersedia
-- [ ] INKON05-3: Evaluate performance tradeoff
-- [ ] INKON05-4: Verify quota behavior tetap benar
+- [x] INKON05-1: Ganti `_connection` snapshot dengan fresh `getProviderConnectionById` read
+- [x] INKON05-2: Import `getProviderConnectionById` sudah ada di `auth.js` ✓
+- [x] INKON05-3: Performance tradeoff acceptable — hanya pada success path, bukan error path
+- [x] INKON05-4: Quota behavior tetap benar — chat sukses setelah quota warning tetap clear quotaStatus
 
 ---
 
@@ -229,24 +229,27 @@
 - [x] INKON-10: deactivate() clear pausedUntil ✓
 - [x] INKON-03: backoffLevel updated setelah pause ✓
 - [x] INKON-04: resumeExpiredPauses skip exhausted connections ✓
+- [x] BUG-T13: Kiro needsArnRefresh flag + skip di credential selection ✓
+- [x] INKON-05: clearAccountError fresh DB read ✓
+
 - [x] No regresi: test suite `50 failed | 44 passed` sama sebelum dan sesudah ✓
 
 ---
 
 ## Yang Belum / Deferred
 
-| ID         | Status   | Keterangan                                    |
-| ---------- | -------- | --------------------------------------------- |
-| T04-4      | TODO     | Unit test formal untuk model=null lock bypass |
-| T01-6      | TODO     | Manual verify acceptance criteria toggle      |
-| T03A-7     | DEFERRED | Batch test results UI diagnosis display       |
-| T03B       | DEFERRED | Deep test via actual chat                     |
-| T07        | DEFERRED | QuotaMonitor dokumentasi                      |
-| T08-3      | TODO     | Unit test formal BUG-T08                      |
-| T10-B3     | TODO     | Manual verify xAI OAuth expired token         |
-| T11-4      | DEFERRED | resumeExpiredPauses qoder backoff guard       |
-| T11-5      | DEFERRED | UI state expired + re-login link              |
-| T13        | TODO     | Kiro stale ARN validation                     |
-| T14B-4     | TODO     | Manual verify SiliconFlow balance             |
-| INKON-05   | TODO     | clearAccountError fresh DB read               |
-| INKON-01-2 | TODO     | Audit caller expect testStatus=active         |
+| ID         | Status   | Keterangan                                       |
+| ---------- | -------- | ------------------------------------------------ |
+| T01-6      | TODO     | Manual verify acceptance criteria toggle         |
+| T03A-7     | DEFERRED | Batch test results UI diagnosis display          |
+| T03B       | DEFERRED | Deep test via actual chat (consume quota)        |
+| T04-4      | TODO     | Unit test formal model=null lock bypass          |
+| T06-3      | TODO     | Manual verify UI handle testStatus=null graceful |
+| T07        | DEFERRED | QuotaMonitor dokumentasi (LOW)                   |
+| T08-3      | TODO     | Unit test formal BUG-T08                         |
+| T10-B3     | TODO     | Manual verify xAI OAuth expired token refresh    |
+| T11-4      | DEFERRED | resumeExpiredPauses qoder backoffLevel guard     |
+| T11-5      | DEFERRED | UI state expired + re-login link untuk Qoder     |
+| T13-1/2    | DEFERRED | Kiro ARN validation di testOAuthConnection       |
+| T14B-4     | TODO     | Manual verify SiliconFlow balance < $0.01        |
+| INKON-01-2 | TODO     | Audit caller yang expect testStatus=active       |
