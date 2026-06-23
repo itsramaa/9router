@@ -6,6 +6,7 @@ export {
   createProviderConnection, updateProviderConnection,
   deleteProviderConnection, deleteProviderConnectionsByProvider,
   reorderProviderConnections, cleanupProviderConnections,
+  atomicUpdateBackoffLevel,
   getProviderNodes, getProviderNodeById,
   createProviderNode, updateProviderNode, deleteProviderNode,
   getProxyPools, getProxyPoolById,

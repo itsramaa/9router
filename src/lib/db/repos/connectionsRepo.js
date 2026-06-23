@@ -169,6 +169,39 @@ export async function updateProviderConnection(id, data) {
   return result;
 }
 
+/**
+ * Atomically read the current backoffLevel, apply computeFn to get the new value,
+ * merge additional fields, and write — all inside a single SQLite transaction.
+ *
+ * This eliminates the read-compute-write race condition in markAccountUnavailable
+ * where two concurrent error handlers could both read backoffLevel=0, both compute
+ * newBackoffLevel=1, and both write 1 instead of incrementing to 2.
+ *
+ * @param {string} id - Connection ID
+ * @param {function} computeFn - (currentBackoffLevel: number) => { newBackoffLevel, extraFields }
+ * @returns {Promise<object|null>} Updated connection or null if not found
+ */
+export async function atomicUpdateBackoffLevel(id, computeFn) {
+  const db = await getAdapter();
+  let result;
+  db.transaction(() => {
+    const row = db.get(`SELECT * FROM providerConnections WHERE id = ?`, [id]);
+    if (!row) { result = null; return; }
+    const existing = rowToConn(row);
+    const currentBackoff = existing.backoffLevel || 0;
+    const { newBackoffLevel, extraFields = {} } = computeFn(currentBackoff);
+    const merged = {
+      ...existing,
+      ...extraFields,
+      backoffLevel: newBackoffLevel,
+      updatedAt: new Date().toISOString(),
+    };
+    upsert(db, merged);
+    result = merged;
+  });
+  return result;
+}
+
 export async function deleteProviderConnection(id) {
   const db = await getAdapter();
   let ok = false;

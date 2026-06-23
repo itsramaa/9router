@@ -4,6 +4,7 @@ import {
   validateApiKey,
   updateProviderConnection,
   getSettings,
+  atomicUpdateBackoffLevel,
 } from '@/lib/localDb';
 
 import { resolveConnectionProxyConfig } from '@/lib/network/connectionProxy';
@@ -578,32 +579,23 @@ export async function markAccountUnavailable(
   }
 
   // Default: per-model lock (short-to-medium cooldown)
-
+  // INKON-06 fix: use atomicUpdateBackoffLevel to prevent race condition where
+  // two concurrent error handlers both read stale backoffLevel and both write
+  // the same increment instead of incrementing twice.
   const lockUpdate = buildModelLockUpdate(model, cooldownMs);
-
-  // Only set testStatus='unavailable' for significant locks (>= 1 minute)
-
-  // Short rate limits (< 60s) should not mark account as unavailable in UI
-
   const isSignificantLock = cooldownMs >= 60 * 1000;
 
-  const updateObj = {
-    ...lockUpdate,
-
-    lastError: reason,
-
-    errorCode: status,
-
-    lastErrorAt: new Date().toISOString(),
-
-    backoffLevel: newBackoffLevel ?? backoffLevel,
-  };
-
-  if (isSignificantLock) {
-    updateObj.testStatus = 'unavailable';
-  }
-
-  await updateProviderConnection(connectionId, updateObj);
+  await atomicUpdateBackoffLevel(connectionId, (currentBackoff) => {
+    const classified = resolveCooldown(status, errorText, currentBackoff, resetsAtMs);
+    const extraFields = {
+      ...lockUpdate,
+      lastError: reason,
+      errorCode: status,
+      lastErrorAt: new Date().toISOString(),
+      ...(isSignificantLock ? { testStatus: 'unavailable' } : {}),
+    };
+    return { newBackoffLevel: classified.newBackoffLevel ?? currentBackoff, extraFields };
+  });
 
   const lockKey = Object.keys(lockUpdate)[0];
 

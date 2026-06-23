@@ -13,6 +13,7 @@ export {
   createProviderConnection, updateProviderConnection,
   deleteProviderConnection, deleteProviderConnectionsByProvider,
   reorderProviderConnections, cleanupProviderConnections,
+  atomicUpdateBackoffLevel,
 } from "./repos/connectionsRepo.js";
 
 // Provider nodes
