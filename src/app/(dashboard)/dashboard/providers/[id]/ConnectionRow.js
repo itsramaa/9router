@@ -280,6 +280,8 @@ export default function ConnectionRow({
 
     if (oneByOneStatus.state === 'failed') return 'error';
 
+    if (oneByOneStatus.state === 'skipped') return 'default';
+
     if (oneByOneStatus.state === 'testing') return 'primary';
 
     return 'default';
@@ -292,7 +294,18 @@ export default function ConnectionRow({
 
     if (oneByOneStatus.state === 'testing') return 'testing';
 
-    if (oneByOneStatus.state === 'success') return 'success';
+    if (oneByOneStatus.state === 'success') {
+      // BUG-T03A: show diagnosis info if quota warning or model locks exist
+      const diag = oneByOneStatus.diagnosis;
+      if (diag && diag.type === 'quota_warning') return `success (quota warning)`;
+      if (diag && diag.type === 'model_locked') return `success (locked: ${diag.activeLocks?.join(', ')})`;
+      return 'success';
+    }
+
+    if (oneByOneStatus.state === 'skipped')
+      return oneByOneStatus.reason === 'paused'
+        ? `skipped (paused)`
+        : 'skipped';
 
     if (oneByOneStatus.state === 'failed')
       return oneByOneStatus.error

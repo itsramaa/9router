@@ -9,9 +9,9 @@ import { buildClearLocks, getActiveLockKeys } from "open-sse/services/modelLockS
 
 /** Account state enum */
 export const ACCOUNT_STATE = {
-  ACTIVE:   "active",    // Normal, in rotation
-  LOCKED:   "locked",    // Auto cooldown from error, will expire
-  PAUSED:   "paused",    // Manual temporary disable, has expiresAt
+  ACTIVE: "active",    // Normal, in rotation
+  LOCKED: "locked",    // Auto cooldown from error, will expire
+  PAUSED: "paused",    // Manual temporary disable, has expiresAt
   INACTIVE: "inactive",  // Permanent off (isActive=false)
 };
 
@@ -29,10 +29,12 @@ export async function activate(connectionId) {
   await updateProviderConnection(connectionId, {
     isActive: true,
     pausedUntil: null,
-    testStatus: "active",
+    testStatus: null,      // BUG-T06 + INKON-01 fix: don't claim "active" without verification
+    // clearAccountError() on next successful chat will set testStatus="active"
     lastError: null,
     lastErrorAt: null,
     backoffLevel: 0,
+    deactivateReason: null,  // BUG-T02 fix: clear reason on activate
     ...clearLocks,
     updatedAt: new Date().toISOString(),
   });
@@ -44,20 +46,26 @@ export async function activate(connectionId) {
  * Deactivate a connection: set isActive=false and clear error state.
  * BUG-6 fix: Now clears error fields for clean deactivation (was preserving state).
  * Manual deactivation should start fresh if reactivated later.
+ * INKON-10 fix: clear pausedUntil so scheduler doesn't auto-resume a manually deactivated connection.
+ * BUG-T02 fix: optional reason param for audit trail.
+ *
  * @param {string} connectionId
+ * @param {string} [reason="manual"] - "manual" | "provider-toggle" | "ban"
  * @returns {Promise<object>} Updated connection
  */
-export async function deactivate(connectionId) {
+export async function deactivate(connectionId, reason = "manual") {
   const conn = await getProviderConnectionById(connectionId);
   if (!conn) throw new Error(`Connection not found: ${connectionId}`);
 
   await updateProviderConnection(connectionId, {
     isActive: false,
+    pausedUntil: null,     // INKON-10 fix: clear pausedUntil so scheduler doesn't auto-resume a manually deactivated connection
     testStatus: null,      // BUG-6 fix: clear error state on manual deactivate
     lastError: null,
     lastErrorAt: null,
     errorCode: null,
     backoffLevel: 0,
+    deactivateReason: reason,  // BUG-T02 fix: store reason for audit trail
     updatedAt: new Date().toISOString(),
   });
 
@@ -190,13 +198,19 @@ export async function resumeExpiredPauses(provider) {
     if (!conn.pausedUntil) continue;
     if (new Date(conn.pausedUntil).getTime() > now) continue;
 
+    // INKON-04 fix: skip connections with quotaStatus='exhausted' — QuotaMonitor Phase 2 handles these
+    // via quota API verification before resuming. Auto-resuming exhausted quota connections would
+    // immediately re-trigger chat errors and re-pause them, wasting requests.
+    if (conn.quotaStatus === 'exhausted') continue;
+
     // BUG-01 + BUG-02 fix: full clean resume matching activate() behavior
     const clearLocks = buildClearLocks(conn);
 
     await updateProviderConnection(conn.id, {
       isActive: true,
       pausedUntil: null,
-      testStatus: "active",
+      testStatus: null,    // BUG-T06 fix: don't claim "active" without verification
+      // clearAccountError() on next successful chat will set testStatus="active"
       lastError: null,
       lastErrorAt: null,
       backoffLevel: 0,

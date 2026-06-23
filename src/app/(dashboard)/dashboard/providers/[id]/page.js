@@ -532,33 +532,47 @@ export default function ProviderDetailPage() {
           [connection.id]: { state: "testing", error: null },
         }));
 
-        try {
-          const res = await fetch(`/api/providers/${connection.id}/test`, { method: "POST" });
-          const data = await res.json();
-          const valid = !!data.valid;
-
-          if (valid) {
-            passed += 1;
-          } else {
-            failed += 1;
-          }
-
-          setOneByOneResults((prev) => ({
-            ...prev,
-            [connection.id]: {
-              state: valid ? "success" : "failed",
-              error: valid ? null : (data.error || null),
-            },
-          }));
-        } catch (error) {
-          failed += 1;
-          setOneByOneResults((prev) => ({
-            ...prev,
-            [connection.id]: {
-              state: "failed",
-              error: error.message || "Test failed",
-            },
-          }));
+        try {
+          const res = await fetch(`/api/providers/${connection.id}/test`, { method: "POST" });
+          const data = await res.json();
+
+          // BUG-T09 fix: handle skipped (paused) connections
+          if (data.skipped) {
+            setOneByOneResults((prev) => ({
+              ...prev,
+              [connection.id]: {
+                state: "skipped",
+                reason: data.reason || null,
+                diagnosis: data.diagnosis || null,
+                error: null,
+              },
+            }));
+            // skipped does not count as pass or fail
+          } else {
+            const valid = !!data.valid;
+            if (valid) {
+              passed += 1;
+            } else {
+              failed += 1;
+            }
+            setOneByOneResults((prev) => ({
+              ...prev,
+              [connection.id]: {
+                state: valid ? "success" : "failed",
+                error: valid ? null : (data.error || null),
+                diagnosis: data.diagnosis || null,  // BUG-T03A: store diagnosis for UI
+              },
+            }));
+          }
+        } catch (error) {
+          failed += 1;
+          setOneByOneResults((prev) => ({
+            ...prev,
+            [connection.id]: {
+              state: "failed",
+              error: error.message || "Test failed",
+            },
+          }));
         }
 
         setOneByOneSummary({
@@ -799,38 +813,48 @@ export default function ProviderDetailPage() {
     return applyProxyAssignments(targets);
   };
 
-  const handleBulkActivate = async () => {
-    if (selectedConnectionIds.length === 0) return;
-    for (const id of selectedConnectionIds) {
-      try {
-        await fetch(`/api/providers/${id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ isActive: true }),
-        });
-      } catch (e) {
-        console.log("Error activating connection:", id, e);
-      }
-    }
-    await fetchConnections();
-    clearSelection();
-  };
-
-  const handleBulkDeactivate = async () => {
-    if (selectedConnectionIds.length === 0) return;
-    for (const id of selectedConnectionIds) {
-      try {
-        await fetch(`/api/providers/${id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ isActive: false }),
-        });
-      } catch (e) {
-        console.log("Error deactivating connection:", id, e);
-      }
-    }
-    await fetchConnections();
-    clearSelection();
+  const handleBulkActivate = async () => {
+    if (selectedConnectionIds.length === 0) return;
+    // BUG-T01 fix: only restore connections that were disabled by a provider toggle
+    const toRestore = connections.filter(
+      (c) => selectedConnectionIds.includes(c.id) && c.disabledByProviderToggle === true
+    );
+    const ids = toRestore.length > 0 ? toRestore.map((c) => c.id) : selectedConnectionIds;
+    for (const id of ids) {
+      try {
+        await fetch(`/api/providers/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isActive: true, disabledByProviderToggle: null }),
+        });
+      } catch (e) {
+        console.log("Error activating connection:", id, e);
+      }
+    }
+    await fetchConnections();
+    clearSelection();
+  };
+
+  const handleBulkDeactivate = async () => {
+    if (selectedConnectionIds.length === 0) return;
+    // BUG-T01 fix: only disable currently active connections and mark with toggle flag
+    const toDisable = connections.filter(
+      (c) => selectedConnectionIds.includes(c.id) && c.isActive !== false
+    );
+    const ids = toDisable.length > 0 ? toDisable.map((c) => c.id) : selectedConnectionIds;
+    for (const id of ids) {
+      try {
+        await fetch(`/api/providers/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isActive: false, disabledByProviderToggle: true }),
+        });
+      } catch (e) {
+        console.log("Error deactivating connection:", id, e);
+      }
+    }
+    await fetchConnections();
+    clearSelection();
   };
 
   const handleBulkTest = async () => {

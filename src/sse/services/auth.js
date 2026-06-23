@@ -1,5 +1,6 @@
 import {
   getProviderConnections,
+  getProviderConnectionById,
   validateApiKey,
   updateProviderConnection,
   getSettings,
@@ -12,6 +13,7 @@ import {
   isModelLockActive,
   buildModelLockUpdate,
   getEarliestModelLockUntil,
+  hasAnyActiveLock,
 } from 'open-sse/services/accountFallback.js';
 
 // BUG-09 fix: import LOCK_VS_PAUSE_THRESHOLD_MS as single source of truth
@@ -149,7 +151,13 @@ export async function getProviderCredentials(
     const availableConnections = connections.filter((c) => {
       if (excludeSet.has(c.id)) return false;
 
-      if (isModelLockActive(c, model)) return false;
+      // BUG-T04 fix: when model=null, isModelLockActive only checks modelLock___all
+      // but misses per-model locks (e.g. modelLock_gpt-4o). Use hasAnyActiveLock instead.
+      if (model === null) {
+        if (hasAnyActiveLock(c)) return false;
+      } else {
+        if (isModelLockActive(c, model)) return false;
+      }
 
       return true;
     });
@@ -435,13 +443,14 @@ export async function markAccountUnavailable(
   if (!connectionId || connectionId === 'noauth')
     return { shouldFallback: false, cooldownMs: 0 };
 
-  const connections = await getProviderConnections({ provider });
-
-  const conn = connections.find((c) => c.id === connectionId);
+  // BUG-T05 fix: use getProviderConnectionById instead of getProviderConnections({ provider }) + find
+  // Avoids loading all connections for a provider (O(n)) when we only need one (O(1))
+  // Also avoids the issue where provider=null would load ALL connections across all providers
+  const conn = await getProviderConnectionById(connectionId);
 
   const backoffLevel = conn?.backoffLevel || 0;
 
-  const { shouldFallback, cooldownMs, newBackoffLevel, action } =
+  const { shouldFallback, cooldownMs, newBackoffLevel, action, isAuthError } =
     resolveCooldown(status, errorText, backoffLevel, resetsAtMs);
 
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
@@ -456,7 +465,8 @@ export async function markAccountUnavailable(
 
   if (action === 'deactivate') {
     try {
-      await lifecycleDeactivate(connectionId);
+      // BUG-T02 fix: pass reason="ban" for audit trail
+      await lifecycleDeactivate(connectionId, 'ban');
 
       log.warn(
         'AUTH',
@@ -474,6 +484,41 @@ export async function markAccountUnavailable(
     return { shouldFallback: true, cooldownMs: 0 };
   }
 
+  // BUG-T08 fix: auth errors with short cooldown (< LOCK_VS_PAUSE_THRESHOLD_MS) were silently
+  // downgraded to per-model lock because the pause condition below requires cooldownMs >= threshold.
+  // e.g. xAI "bad-credentials" (now 1h via errorConfig rule) or generic 401/403 status rule (2min).
+  // For isAuthError: apply floor of LOCK_VS_PAUSE_THRESHOLD_MS so account is always paused, not locked.
+  // For isRateLimit: keep existing lock behavior (don't pause on temporary rate limits).
+  if (action === 'pause' && cooldownMs < LOCK_VS_PAUSE_THRESHOLD_MS && isAuthError) {
+    const floorCooldown = LOCK_VS_PAUSE_THRESHOLD_MS;
+    log.warn(
+      'AUTH',
+      `${connName} auth error pause floor applied: ${cooldownMs}ms → ${floorCooldown}ms [${status}]: ${reason}`
+    );
+    try {
+      await lifecyclePause(connectionId, floorCooldown);
+      await updateProviderConnection(connectionId, {
+        backoffLevel: newBackoffLevel ?? backoffLevel,
+        lastError: reason,
+        errorCode: status,
+        lastErrorAt: new Date().toISOString(),
+      });
+      log.warn('AUTH', `${connName} PAUSED (auth floor) for ${Math.round(floorCooldown / 60000)}min [${status}]: ${reason}`);
+    } catch (e) {
+      log.warn('AUTH', `${connName} auth floor pause failed, falling back to lock: ${e.message}`);
+      const lockUpdate = buildModelLockUpdate(model, floorCooldown);
+      await updateProviderConnection(connectionId, {
+        ...lockUpdate,
+        testStatus: 'unavailable',
+        lastError: reason,
+        errorCode: status,
+        lastErrorAt: new Date().toISOString(),
+        backoffLevel: newBackoffLevel ?? backoffLevel,
+      });
+    }
+    return { shouldFallback: true, cooldownMs: floorCooldown };
+  }
+
   // Escalated pause — quota exhausted with long cooldown (≥ LOCK_VS_PAUSE_THRESHOLD_MS)
 
   // BUG-09 fix: use shared constant from cooldownPolicy.js instead of hardcoded 60*60*1000
@@ -481,6 +526,15 @@ export async function markAccountUnavailable(
   if (action === 'pause' && cooldownMs >= LOCK_VS_PAUSE_THRESHOLD_MS) {
     try {
       await lifecyclePause(connectionId, cooldownMs);
+
+      // INKON-03 fix: lifecyclePause() does not update backoffLevel — do it here
+      // so escalation logic (newLevel >= ESCALATION_THRESHOLD) uses accurate counts
+      await updateProviderConnection(connectionId, {
+        backoffLevel: newBackoffLevel ?? backoffLevel,
+        lastError: reason,
+        errorCode: status,
+        lastErrorAt: new Date().toISOString(),
+      });
 
       log.warn(
         'AUTH',

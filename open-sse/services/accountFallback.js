@@ -17,6 +17,7 @@ export {
   getEarliestLock as getEarliestModelLockUntil,
   buildSetLock as buildModelLockUpdate,
   buildClearLocks as buildClearModelLocksUpdate,
+  hasAnyActiveLock,
 } from "./modelLockStore.js";
 
 /**

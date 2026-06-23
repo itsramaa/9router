@@ -72,6 +72,9 @@ export const ERROR_RULES = [
   },
 
   // Rate limit patterns (temporary, per-minute throttling) — backoff, don't pause
+  // NOTE: OpenRouter free-tier daily limit rule must come BEFORE this generic rule
+  // because "free-tier daily limit" text also contains "rate limit" substring (BUG-T12 fix)
+  { text: 'free-tier daily limit', cooldownMs: COOLDOWN.quota, isQuotaExhausted: true },
   { text: 'rate limit', backoff: true, isRateLimit: true },
   { text: 'too many requests', backoff: true, isRateLimit: true },
   { text: 'requests per minute', backoff: true, isRateLimit: true },
@@ -122,6 +125,19 @@ export const ERROR_RULES = [
     cooldownMs: COOLDOWN.quota,
     isQuotaExhausted: true,
   },
+  // Qoder code:112 — pricing/quota limit, message contains pricingUrl after nested JSON unwrap
+  {
+    text: 'quota limit reached',
+    cooldownMs: COOLDOWN.quota,
+    isQuotaExhausted: true,
+  },
+  // Qoder code:112 raw fallback — match pricingUrl before unwrap happens (classifyError receives
+  // the already-unwrapped message from parseUpstreamError, but guard here too for direct callers)
+  {
+    text: 'pricingurl',
+    cooldownMs: COOLDOWN.quota,
+    isQuotaExhausted: true,
+  },
   // xAI (Grok) spending-limit: 403 + "personal-team-blocked:spending-limit" / "run out of credits"
   {
     text: 'spending-limit',
@@ -138,11 +154,27 @@ export const ERROR_RULES = [
     cooldownMs: COOLDOWN.quota,
     isQuotaExhausted: true,
   },
+  // xAI (Grok) bad-credentials: 403 + "unauthenticated:bad-credentials" / token validation failure
+  // cooldownMs = 1h so markAccountUnavailable triggers lifecyclePause (>= LOCK_VS_PAUSE_THRESHOLD_MS)
+  // rather than falling through to the 2-min lock path (BUG-T08 / BUG-T10A fix)
+  {
+    text: 'bad-credentials',
+    cooldownMs: 60 * 60 * 1000,
+    isAuthError: true,
+  },
+  {
+    text: 'access token could not be validated',
+    cooldownMs: 60 * 60 * 1000,
+    isAuthError: true,
+  },
 
   // Server overload (temporary) — backoff, don't pause
   { text: 'capacity', backoff: true, isRateLimit: true },
   { text: 'overloaded', backoff: true, isRateLimit: true },
   { text: 'service unavailable', backoff: true, isRateLimit: true },
+  // SiliconFlow (and similar): 503 "System is really busy" — transient overload, backoff
+  { text: 'system is really busy', backoff: true, isRateLimit: true },
+  { text: 'try again later', backoff: true, isRateLimit: true },
 
   // --- Status-based rules (fallback when text doesn't match) ---
   { status: 400, cooldownMs: 0, shouldFallback: false }, // BUG-005: bad request — don't cycle accounts

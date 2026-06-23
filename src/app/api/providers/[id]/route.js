@@ -155,6 +155,8 @@ export async function PUT(request, { params }) {
       lastErrorAt,
 
       providerSpecificData,
+
+      disabledByProviderToggle,
     } = body;
 
     const existing = await getProviderConnectionById(id);
@@ -200,6 +202,9 @@ export async function PUT(request, { params }) {
 
     if (lastErrorAt !== undefined) updateData.lastErrorAt = lastErrorAt;
 
+    // BUG-T01 fix: persist disabledByProviderToggle for selective restore on provider toggle
+    if (disabledByProviderToggle !== undefined) updateData.disabledByProviderToggle = disabledByProviderToggle ?? null;
+
     // isActive toggle: route through AccountLifecycle so activate() clears stale locks
 
     if (isActive !== undefined && isActive !== existing.isActive) {
@@ -210,7 +215,8 @@ export async function PUT(request, { params }) {
         if (isActive) {
           await activate(id);
         } else {
-          await deactivate(id);
+          // BUG-T02 fix: pass reason="manual" so audit trail knows this was user-initiated
+          await deactivate(id, 'manual');
         }
       } catch {
         // Fallback to plain update if lifecycle service unavailable

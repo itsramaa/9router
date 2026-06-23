@@ -107,14 +107,33 @@ export function getExpiredLockKeys(connection) {
     .map(([k]) => k);
 }
 
-/**
- * Return keys of all currently active modelLock_* fields on a connection.
- * @param {object} connection
- * @returns {string[]}
- */
-export function getActiveLockKeys(connection) {
-  const now = Date.now();
-  return Object.entries(connection)
-    .filter(([k, v]) => k.startsWith(MODEL_LOCK_PREFIX) && v && new Date(v).getTime() > now)
-    .map(([k]) => k);
+/**
+ * Return keys of all currently active modelLock_* fields on a connection.
+ * @param {object} connection
+ * @returns {string[]}
+ */
+export function getActiveLockKeys(connection) {
+  const now = Date.now();
+  return Object.entries(connection)
+    .filter(([k, v]) => k.startsWith(MODEL_LOCK_PREFIX) && v && new Date(v).getTime() > now)
+    .map(([k]) => k);
+}
+
+/**
+ * Check if a connection has ANY active modelLock_* field, regardless of model.
+ * Used when model=null in credential selection to skip connections with any active lock.
+ *
+ * BUG-T04 fix: isLockActive(conn, null) only checks modelLock___all, not per-model locks.
+ * When model is not known, we must check all lock fields to avoid using a locked connection.
+ *
+ * @param {object} connection - Connection record with flat modelLock_* fields
+ * @returns {boolean}
+ */
+export function hasAnyActiveLock(connection) {
+  const now = Date.now();
+  for (const [key, val] of Object.entries(connection)) {
+    if (!key.startsWith(MODEL_LOCK_PREFIX) || !val) continue;
+    if (new Date(val).getTime() > now) return true;
+  }
+  return false;
 }

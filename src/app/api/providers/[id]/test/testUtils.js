@@ -1,4 +1,5 @@
 import { getProviderConnectionById, updateProviderConnection } from "@/lib/localDb";
+import { getActiveLockKeys } from "open-sse/services/modelLockStore.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { testProxyUrl } from "@/lib/network/proxyTest";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
@@ -8,6 +9,7 @@ import {
   refreshProviderCredentials,
   shouldRefreshCredentials,
 } from "open-sse/services/oauthCredentialManager.js";
+import { refreshXaiToken } from "open-sse/services/tokenRefresh/providers.js";
 import {
   GEMINI_CONFIG,
   ANTIGRAVITY_CONFIG,
@@ -91,6 +93,14 @@ const OAUTH_TEST_CONFIG = {
     authPrefix: "Bearer ",
   },
   codebuddy: { tokenExists: true },
+  // BUG-T10B fix: xAI OAuth test config — probe /v1/models with Bearer token, refreshable
+  xai: {
+    url: "https://api.x.ai/v1/models",
+    method: "GET",
+    authHeader: "Authorization",
+    authPrefix: "Bearer ",
+    refreshable: true,
+  },
 };
 
 async function probeClineAccessToken(accessToken) {
@@ -208,6 +218,15 @@ async function refreshOAuthToken(connection) {
         expiresIn,
         refreshToken: data?.refreshToken || refreshToken,
       };
+    }
+
+    // BUG-T10B fix: xAI OAuth token refresh via XaiService
+    if (provider === "xai") {
+      const result = await refreshXaiToken(refreshToken, console);
+      if (result?.accessToken) {
+        return { accessToken: result.accessToken, expiresIn: result.expiresIn || 3600, refreshToken: result.refreshToken || refreshToken };
+      }
+      return null;
     }
 
     return null;
@@ -527,7 +546,19 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
       }
       case "siliconflow": {
         const res = await fetchWithConnectionProxy("https://api.siliconflow.com/v1/models", { headers: { Authorization: `Bearer ${connection.apiKey}` } }, effectiveProxy);
-        return { valid: res.ok, error: res.ok ? null : "Invalid API key" };
+        if (!res.ok) return { valid: false, error: "Invalid API key" };
+        // BUG-T14B fix: check balance — key can be valid but credits exhausted
+        try {
+          const balRes = await fetchWithConnectionProxy("https://api.siliconflow.com/v1/user/info", { headers: { Authorization: `Bearer ${connection.apiKey}` } }, effectiveProxy);
+          if (balRes.ok) {
+            const balData = await balRes.json().catch(() => null);
+            const balance = balData?.data?.balance ?? balData?.balance ?? null;
+            if (balance !== null && Number(balance) < 0.01) {
+              return { valid: true, warning: `Credits nearly exhausted (balance: ${balance})` };
+            }
+          }
+        } catch { /* non-fatal — key check already passed */ }
+        return { valid: true, error: null };
       }
       case "hyperbolic": {
         const res = await fetchWithConnectionProxy("https://api.hyperbolic.xyz/v1/models", { headers: { Authorization: `Bearer ${connection.apiKey}` } }, effectiveProxy);
@@ -622,11 +653,45 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
 }
 
 /**
+ * Build diagnosis object from connection DB state after probe.
+ */
+function buildDiagnosis(conn) {
+  const now = Date.now();
+  const isPaused = conn.isActive === false && conn.pausedUntil && new Date(conn.pausedUntil).getTime() > now;
+  const activeLockKeys = getActiveLockKeys(conn);
+  const activeLocks = activeLockKeys.map((k) => k.replace("modelLock_", ""));
+  const quotaStatus = conn.quotaStatus || null;
+
+  if (isPaused) return { type: "paused", message: `Paused until ${conn.pausedUntil}`, isPaused: true, pausedUntil: conn.pausedUntil, activeLocks, quotaStatus };
+  if (quotaStatus === "exhausted") return { type: "quota_warning", message: conn.quotaWarningMessage || "Quota appears exhausted", isPaused: false, pausedUntil: null, activeLocks, quotaStatus };
+  if (activeLocks.length > 0) return { type: "model_locked", message: `Models locked: ${activeLocks.join(", ")}`, isPaused: false, pausedUntil: null, activeLocks, quotaStatus };
+  return { type: "ok", message: null, isPaused: false, pausedUntil: null, activeLocks, quotaStatus };
+}
+
+/**
  * Test a single connection by ID, update DB, and return result.
  */
 export async function testSingleConnection(id) {
   const connection = await getProviderConnectionById(id);
   if (!connection) return { valid: false, error: "Connection not found", latencyMs: 0, testedAt: new Date().toISOString() };
+
+  // BUG-T09 fix: skip paused connections — don't corrupt pause state by overwriting testStatus
+  const now = Date.now();
+  const isPaused = connection.isActive === false
+    && connection.pausedUntil
+    && new Date(connection.pausedUntil).getTime() > now;
+  if (isPaused) {
+    const diagnosis = buildDiagnosis(connection);
+    return {
+      valid: false,
+      skipped: true,
+      reason: "paused",
+      pausedUntil: connection.pausedUntil,
+      diagnosis,
+      latencyMs: 0,
+      testedAt: new Date().toISOString(),
+    };
+  }
 
   const effectiveProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
 
@@ -654,9 +719,19 @@ export async function testSingleConnection(id) {
 
   const latencyMs = Date.now() - start;
 
+  // BUG-T11 fix: Qoder device token expire detection
+  // Distinguish between quota exhaustion (pricingUrl/code:112) vs token expiry (auth error)
+  // Quota errors are handled by chat-first policy; token expiry needs user re-login
+  const isQoderTokenExpired = connection.provider === "qoder"
+    && !result.valid
+    && result.error
+    && !result.error.toLowerCase().includes("pricingurl")
+    && !result.error.toLowerCase().includes("quota")
+    && !result.error.toLowerCase().includes("pricing");
+
   const updateData = {
-    testStatus: result.valid ? "active" : "error",
-    lastError: result.valid ? null : result.error,
+    testStatus: result.valid ? "active" : (isQoderTokenExpired ? "expired" : "error"),
+    lastError: result.valid ? null : (isQoderTokenExpired ? "Device token expired — please re-login to Qoder" : result.error),
     lastErrorAt: result.valid ? null : new Date().toISOString(),
   };
 
@@ -681,5 +756,25 @@ export async function testSingleConnection(id) {
 
   await updateProviderConnection(id, updateData);
 
-  return { valid: result.valid, error: result.error, refreshed: !!result.refreshed, latencyMs, testedAt: new Date().toISOString() };
+  // BUG-T03A fix: enrich response with DB state after probe
+  const freshConn = await getProviderConnectionById(id);
+  // BUG-T14B fix: if warning from provider test (e.g. SiliconFlow low balance), surface in diagnosis
+  const diagnosisBase = freshConn ? buildDiagnosis(freshConn) : { type: "ok", message: null, isPaused: false, pausedUntil: null, activeLocks: [], quotaStatus: null };
+  const diagnosis = result.warning
+    ? { ...diagnosisBase, type: diagnosisBase.type === "ok" ? "quota_warning" : diagnosisBase.type, message: result.warning }
+    : diagnosisBase;
+
+  return {
+    valid: result.valid,
+    error: result.error,
+    refreshed: !!result.refreshed,
+    skipped: false,
+    isPaused: diagnosis.isPaused,
+    pausedUntil: diagnosis.pausedUntil,
+    quotaStatus: diagnosis.quotaStatus,
+    activeLocks: diagnosis.activeLocks,
+    diagnosis,
+    latencyMs,
+    testedAt: new Date().toISOString(),
+  };
 }

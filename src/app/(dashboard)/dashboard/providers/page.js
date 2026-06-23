@@ -226,23 +226,55 @@ export default function ProvidersPage() {
 
   // Toggle all connections for a provider on/off. authType may be a single
   // string or an array (kiro counts oauth + api_key/apikey together).
+  // BUG-T01 fix: selective restore — only re-activate connections that were disabled by this toggle,
+  // not ones the user manually disabled beforehand.
   const handleToggleProvider = async (providerId, authType, newActive) => {
     const authTypes = Array.isArray(authType) ? authType : [authType];
     const matches = (c) =>
       c.provider === providerId && authTypes.includes(c.authType);
     const providerConns = connections.filter(matches);
-    setConnections((prev) =>
-      prev.map((c) => (matches(c) ? { ...c, isActive: newActive } : c)),
-    );
-    await Promise.allSettled(
-      providerConns.map((c) =>
-        fetch(`/api/providers/${c.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ isActive: newActive }),
-        }),
-      ),
-    );
+
+    if (newActive) {
+      // Activate path: only restore connections that were disabled by a previous provider toggle
+      const toRestore = providerConns.filter((c) => c.disabledByProviderToggle === true);
+      if (toRestore.length === 0) return;
+      setConnections((prev) =>
+        prev.map((c) =>
+          toRestore.some((r) => r.id === c.id)
+            ? { ...c, isActive: true, disabledByProviderToggle: null }
+            : c
+        ),
+      );
+      await Promise.allSettled(
+        toRestore.map((c) =>
+          fetch(`/api/providers/${c.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ isActive: true, disabledByProviderToggle: null }),
+          }),
+        ),
+      );
+    } else {
+      // Deactivate path: disable only currently active connections and mark them with the toggle flag
+      const toDisable = providerConns.filter((c) => c.isActive !== false);
+      if (toDisable.length === 0) return;
+      setConnections((prev) =>
+        prev.map((c) =>
+          toDisable.some((d) => d.id === c.id)
+            ? { ...c, isActive: false, disabledByProviderToggle: true }
+            : c
+        ),
+      );
+      await Promise.allSettled(
+        toDisable.map((c) =>
+          fetch(`/api/providers/${c.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ isActive: false, disabledByProviderToggle: true }),
+          }),
+        ),
+      );
+    }
   };
 
   const handleBatchTest = async (mode, providerId = null) => {
