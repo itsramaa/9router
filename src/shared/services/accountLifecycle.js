@@ -17,6 +17,8 @@ export const ACCOUNT_STATE = {
 
 /**
  * Activate a connection: set isActive=true, clear all model locks, reset error state.
+ * BUG-T13 fix: if previous lastError indicates Kiro profile ARN issue, set needsArnRefresh=true
+ * so getProviderCredentials can skip this connection until ARN is re-resolved.
  * @param {string} connectionId
  * @returns {Promise<object>} Updated connection
  */
@@ -26,15 +28,21 @@ export async function activate(connectionId) {
 
   const clearLocks = buildClearLocks(conn);
 
+  // BUG-T13 fix: detect Kiro stale ARN from previous lastError
+  const lastErrorLower = (conn.lastError || '').toLowerCase();
+  const needsArnRefresh = conn.provider === 'kiro'
+    && (lastErrorLower.includes('arn') || lastErrorLower.includes('profile'));
+
   await updateProviderConnection(connectionId, {
     isActive: true,
     pausedUntil: null,
     testStatus: null,      // BUG-T06 + INKON-01 fix: don't claim "active" without verification
-    // clearAccountError() on next successful chat will set testStatus="active"
+                           // clearAccountError() on next successful chat will set testStatus="active"
     lastError: null,
     lastErrorAt: null,
     backoffLevel: 0,
     deactivateReason: null,  // BUG-T02 fix: clear reason on activate
+    needsArnRefresh: needsArnRefresh || null,  // BUG-T13: signal Kiro ARN needs re-resolve
     ...clearLocks,
     updatedAt: new Date().toISOString(),
   });

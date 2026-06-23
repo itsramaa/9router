@@ -151,6 +151,13 @@ export async function getProviderCredentials(
     const availableConnections = connections.filter((c) => {
       if (excludeSet.has(c.id)) return false;
 
+      // BUG-T13 fix: skip Kiro connections that need ARN re-resolution
+      // These were activated after a profile ARN error — they need to re-login or re-resolve ARN first
+      if (c.provider === 'kiro' && c.needsArnRefresh) {
+        log.warn('AUTH', `Skipping Kiro connection ${c.id?.slice(0, 8)} — needsArnRefresh=true (stale profile ARN)`);
+        return false;
+      }
+
       // BUG-T04 fix: when model=null, isModelLockActive only checks modelLock___all
       // but misses per-model locks (e.g. modelLock_gpt-4o). Use hasAnyActiveLock instead.
       if (model === null) {
@@ -650,7 +657,11 @@ export async function clearAccountError(
 ) {
   if (!connectionId || connectionId === 'noauth') return;
 
-  const conn = currentConnection._connection || currentConnection;
+  // INKON-05 fix: use fresh DB read instead of snapshot from credential selection time.
+  // Between credential selection and chat success, QuotaMonitor may have updated quotaStatus.
+  // Using stale _connection snapshot could overwrite newer state from QuotaMonitor.
+  const conn = await getProviderConnectionById(connectionId);
+  if (!conn) return; // connection deleted between selection and success
 
   const now = Date.now();
 
@@ -724,19 +735,16 @@ export async function clearAccountError(
 
     clearObj.quotaWarningMessage = null;
 
-
-
     clearObj.errorCode = null; // BUG-1 fix: clear errorCode when clearing quota warning
-
-
 
   }
 
-
+  // BUG-T13 fix: clear needsArnRefresh on successful Kiro chat — ARN is now valid
+  if (conn.needsArnRefresh) {
+    clearObj.needsArnRefresh = null;
+  }
 
   // Only write to DB if there is actually something to clear
-
-
 
   if (Object.keys(clearObj).length === 0) return;
 
