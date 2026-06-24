@@ -42,8 +42,11 @@ import { resolveConnectionProxyConfig } from '@/lib/network/connectionProxy';
 
 import { refreshTokenByProvider } from './tokenRefresh.js';
 
-// Providers that have quota APIs and should be monitored
-
+// Providers that have quota APIs and should be monitored.
+// NOTE: xAI is intentionally excluded — xAI does not expose a public quota/usage API.
+// xAI quota exhaustion (spending-limit) is detected via chat-first policy:
+// text-rule "spending-limit" in errorConfig.js → classifyError → isQuotaExhausted → pause 24h.
+// Auto-recovery for xAI is purely time-based via resumeExpiredPauses() (no quota verification).
 export const QUOTA_SUPPORTED_PROVIDERS = new Set([
   'claude',
   'github',

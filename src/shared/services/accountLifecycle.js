@@ -37,7 +37,7 @@ export async function activate(connectionId) {
     isActive: true,
     pausedUntil: null,
     testStatus: null,      // BUG-T06 + INKON-01 fix: don't claim "active" without verification
-                           // clearAccountError() on next successful chat will set testStatus="active"
+    // clearAccountError() on next successful chat will set testStatus="active"
     lastError: null,
     lastErrorAt: null,
     backoffLevel: 0,

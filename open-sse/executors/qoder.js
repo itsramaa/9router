@@ -483,12 +483,15 @@ export class QoderExecutor extends BaseExecutor {
                 }
               } catch { /* keep default msg */ }
               reader.cancel();
+              // Always return 402 (payment required) for Qoder quota errors
+              // regardless of statusCodeValue (403/401/etc).
+              // In fallbackOrchestrator, 402 goes directly to markAccountUnavailable
+              // path which correctly identifies isQuotaExhausted and triggers pause+fallback.
+              // Using 403 would enter the special 401/403 branch which has more complex
+              // classification logic and might not fallback in all cases.
               const errResp = new Response(
                 JSON.stringify({ error: { message: msg } }),
-                {
-                  status: statusVal === 403 || statusVal === 401 ? statusVal : 402,
-                  headers: { "Content-Type": "application/json" }
-                },
+                { status: 402, headers: { "Content-Type": "application/json" } },
               );
               return { response: errResp, url, headers, transformedBody: payload };
             }

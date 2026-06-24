@@ -82,6 +82,27 @@ export async function parseUpstreamError(response, executor = null) {
     message = bodyText;
   }
 
+  // Unwrap nested JSON strings (e.g. Qoder code:112 returns message: '{"pricingUrl":"..."}')
+  // Try to parse the message as JSON and extract a human-readable string from it.
+  if (typeof message === "string") {
+    try {
+      const inner = JSON.parse(message);
+      if (inner && typeof inner === "object") {
+        // Prefer explicit message/error fields; otherwise build a readable string from known fields
+        if (typeof inner.message === "string") {
+          message = inner.message;
+        } else if (typeof inner.error === "string") {
+          message = inner.error;
+        } else if (typeof inner.pricingUrl === "string") {
+          // Qoder code:112 — quota/pricing limit, surface upgrade prompt
+          message = `Quota limit reached. Upgrade at: ${inner.pricingUrl}`;
+        }
+      }
+    } catch {
+      // not nested JSON — keep message as-is
+    }
+  }
+
   const messageStr = typeof message === "string" ? message : JSON.stringify(message);
   const finalMessage = messageStr || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
 
