@@ -46,6 +46,8 @@ import {
 
 import { startClaudeAutoPing } from '@/shared/services/claudeAutoPing';
 
+import { startDailyAccountCheck } from '@/shared/services/dailyAccountCheck';
+
 import { register, start } from '@/shared/services/usageScheduler';
 
 import {
@@ -161,12 +163,12 @@ export async function initializeApp() {
       g.signalHandlersRegistered = true;
     }
 
-    ensureCloudflared().catch(() => {});
+    ensureCloudflared().catch(() => { });
 
-    syncMitmAliasCache().catch(() => {});
+    syncMitmAliasCache().catch(() => { });
 
     setTunnelUnexpectedExitCallback(() => {
-      safeRestartTunnel('unexpected-exit').catch(() => {});
+      safeRestartTunnel('unexpected-exit').catch(() => { });
     });
 
     startWatchdog();
@@ -178,6 +180,9 @@ export async function initializeApp() {
     // Claude auto-ping: warm 5h window right after reset
 
     startClaudeAutoPing();
+
+    // Daily account validation: ping semua akun saat midnight UTC
+    startDailyAccountCheck();
 
     // QuotaMonitor: proactive quota-based lock/pause/recovery every 10 min
 
@@ -407,9 +412,9 @@ function startWatchdog() {
   if (g.watchdogInterval) return;
 
   g.watchdogInterval = setInterval(() => {
-    safeRestartTunnel('watchdog').catch(() => {});
+    safeRestartTunnel('watchdog').catch(() => { });
 
-    safeRestartTailscale('watchdog').catch(() => {});
+    safeRestartTailscale('watchdog').catch(() => { });
   }, WATCHDOG_INTERVAL_MS);
 
   if (g.watchdogInterval.unref) g.watchdogInterval.unref();
@@ -482,9 +487,9 @@ function startNetworkMonitor() {
             ? 'sleep'
             : 'netchange';
 
-      safeRestartTunnel(reason).catch(() => {});
+      safeRestartTunnel(reason).catch(() => { });
 
-      safeRestartTailscale(reason).catch(() => {});
+      safeRestartTailscale(reason).catch(() => { });
     } catch (err) {
       console.log('[NetworkMonitor] error:', err.message);
     }
