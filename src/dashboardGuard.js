@@ -110,29 +110,20 @@ const PROTECTED_API_PATHS = [
 // Routes that spawn child processes or read host secrets — restrict to localhost.
 
 const LOCAL_ONLY_PATHS = [
-  '/api/cli-tools/cowork-settings',
-
-  '/api/cli-tools/antigravity-mitm',
-
-  '/api/mcp/',
-
-  '/api/tunnel/tailscale-install',
-
-  '/api/tunnel/tailscale-enable',
-
-  '/api/tunnel/tailscale-disable',
-
-  '/api/tunnel/tailscale-check',
-
-  '/api/tunnel/enable',
-
-  '/api/tunnel/disable',
-
-  '/api/oauth/cursor/auto-import',
-
-  '/api/oauth/kiro/auto-import',
-
-  '/api/auth/reset-password',
+  "/api/cli-tools/cowork-settings",
+  "/api/cli-tools/antigravity-mitm",
+  "/api/mcp/",
+  "/api/tunnel/tailscale-install",
+  "/api/tunnel/tailscale-enable",
+  "/api/tunnel/tailscale-disable",
+  "/api/tunnel/tailscale-check",
+  "/api/tunnel/enable",
+  "/api/tunnel/disable",
+  "/api/oauth/cursor/auto-import",
+  "/api/oauth/kiro/auto-import",
+  "/api/auth/reset-password",
+  "/api/headroom/start",
+  "/api/headroom/stop",
 ];
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);

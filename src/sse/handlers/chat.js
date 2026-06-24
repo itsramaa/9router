@@ -34,6 +34,20 @@ import {
 import { getProjectIdForConnection } from 'open-sse/services/projectId.js';
 
 import { runWithFallback } from '../services/fallbackOrchestrator.js';
+} from "../services/auth.js";
+import { cacheClaudeHeaders } from "open-sse/utils/claudeHeaderCache.js";
+import { getSettings } from "@/lib/localDb";
+import { getModelInfo, getComboModels } from "../services/model.js";
+import { handleChatCore } from "open-sse/handlers/chatCore.js";
+import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
+import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
+import { handleComboChat, handleFusionChat } from "open-sse/services/combo.js";
+import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
+import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
+import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
+import * as log from "../utils/logger.js";
+import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
+import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 
 /**
 
@@ -370,9 +384,19 @@ async function handleSingleModelChat(
 
         rtkEnabled: !!chatSettings.rtkEnabled,
 
+        headroomEnabled: !!chatSettings.headroomEnabled,
+
+        headroomUrl: chatSettings.headroomUrl || DEFAULT_HEADROOM_URL,
+
+        headroomCompressUserMessages: !!chatSettings.headroomCompressUserMessages,
+
         cavemanEnabled: !!chatSettings.cavemanEnabled,
 
         cavemanLevel: chatSettings.cavemanLevel || 'full',
+
+        ponytailEnabled: !!chatSettings.ponytailEnabled,
+
+        ponytailLevel: chatSettings.ponytailLevel || 'full',
 
         providerThinking,
 
@@ -391,7 +415,6 @@ async function handleSingleModelChat(
         },
 
         // BUG-19 fix: removed onRequestSuccess — clearAccountError is called by
-
         // onSuccess in runWithFallback to avoid double DB write per request
       });
     },

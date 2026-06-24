@@ -37,9 +37,7 @@ const COMBINED_WEB_ITEM = { id: "web", label: "Web Fetch & Search", icon: "trave
 
 
 const navItems = [
-
-  { href: "/dashboard/endpoint", label: "Endpoint", icon: "api" },
-
+  { href: "/dashboard/endpoint", label: "Endpoint & Key", icon: "api" },
   { href: "/dashboard/providers", label: "Providers", icon: "dns" },
 
   // { href: "/dashboard/basic-chat", label: "Basic Chat", icon: "chat" }, // Hidden
