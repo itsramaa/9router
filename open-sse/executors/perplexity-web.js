@@ -7,6 +7,46 @@ const PPLX_SSE_ENDPOINT = PROVIDERS["perplexity-web"].baseUrl;
 const PPLX_API_VERSION = "2.18";
 const PPLX_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
+// Cookie pool state per credentials key (in-memory, per-process)
+const pplxCookiePoolState = new Map();
+
+/**
+ * Parse apiKey menjadi array cookies.
+ * User bisa paste satu atau banyak __Secure-next-auth.session-token dipisah koma/newline.
+ */
+function parsePplxCookiePool(apiKey) {
+  if (!apiKey) return [];
+  const prefix = "__Secure-next-auth.session-token=";
+  return apiKey
+    .split(/[\n,;]+/)
+    .map(c => c.trim())
+    .filter(Boolean)
+    .map(c => c.startsWith(prefix) ? c.slice(prefix.length) : c);
+}
+
+function pickPplxCookie(credKey, cookies) {
+  if (!cookies.length) return null;
+  if (!pplxCookiePoolState.has(credKey)) {
+    pplxCookiePoolState.set(credKey, { index: 0, cooldowns: new Map() });
+  }
+  const state = pplxCookiePoolState.get(credKey);
+  const now = Date.now();
+  for (let i = 0; i < cookies.length; i++) {
+    const idx = (state.index + i) % cookies.length;
+    const cookie = cookies[idx];
+    if (now >= (state.cooldowns.get(cookie) || 0)) {
+      state.index = (idx + 1) % cookies.length;
+      return cookie;
+    }
+  }
+  return null;
+}
+
+function cooldownPplxCookie(credKey, cookie, cooldownMs = 60_000) {
+  if (!pplxCookiePoolState.has(credKey)) return;
+  pplxCookiePoolState.get(credKey).cooldowns.set(cookie, Date.now() + cooldownMs);
+}
+
 const MODEL_MAP = {
   "pplx-auto": ["concise", "pplx_pro"],
   "pplx-sonar": ["copilot", "experimental"],
@@ -442,10 +482,26 @@ export class PerplexityWebExecutor extends BaseExecutor {
       "X-App-ApiVersion": PPLX_API_VERSION,
     };
 
+    // Auth: accessToken (Bearer) atau apiKey (cookie pool)
+    let activeCookie = null;
+    let credKey = null;
+    let cookiePool = [];
+
     if (credentials.accessToken) {
       headers["Authorization"] = `Bearer ${credentials.accessToken}`;
     } else if (credentials.apiKey) {
-      headers["Cookie"] = `__Secure-next-auth.session-token=${credentials.apiKey}`;
+      credKey = credentials.apiKey;
+      cookiePool = parsePplxCookiePool(credKey);
+      activeCookie = cookiePool.length > 1
+        ? pickPplxCookie(credKey, cookiePool)
+        : cookiePool[0] || credKey;
+
+      if (activeCookie) {
+        headers["Cookie"] = `__Secure-next-auth.session-token=${activeCookie}`;
+        if (cookiePool.length > 1) {
+          log?.debug?.("PPLX-WEB", `Cookie pool size=${cookiePool.length}, using cookie[...${activeCookie.slice(-8)}]`);
+        }
+      }
     }
 
     log?.info?.("PPLX-WEB", `Query to ${model} (pref=${modelPref}, mode=${pplxMode}), len=${query.length}`);
@@ -466,9 +522,26 @@ export class PerplexityWebExecutor extends BaseExecutor {
 
     if (!response.ok) {
       const status = response.status;
+      // 429: tandai cookie ini cooldown, coba cookie lain dari pool
+      if (status === 429 && cookiePool.length > 1 && activeCookie && credKey) {
+        cooldownPplxCookie(credKey, activeCookie, 60_000);
+        const nextCookie = pickPplxCookie(credKey, cookiePool);
+        if (nextCookie && nextCookie !== activeCookie) {
+          log?.warn?.("PPLX-WEB", `Rate limited on cookie[...${activeCookie.slice(-8)}], rotating to cookie[...${nextCookie.slice(-8)}]`);
+          headers["Cookie"] = `__Secure-next-auth.session-token=${nextCookie}`;
+          try {
+            const retryOpts = { method: "POST", headers, body: JSON.stringify(pplxBody) };
+            if (signal) retryOpts.signal = signal;
+            const retryResponse = await fetch(PPLX_SSE_ENDPOINT, retryOpts);
+            if (retryResponse.ok || retryResponse.body) {
+              return { response: retryResponse, url: PPLX_SSE_ENDPOINT, headers, transformedBody: pplxBody };
+            }
+          } catch { /* fall through */ }
+        }
+      }
       let errMsg = `Perplexity returned HTTP ${status}`;
       if (status === 401 || status === 403) errMsg = "Perplexity auth failed — session cookie may be expired. Re-paste your __Secure-next-auth.session-token.";
-      else if (status === 429) errMsg = "Perplexity rate limited. Wait a moment and retry.";
+      else if (status === 429) errMsg = `Perplexity rate limited. ${cookiePool.length > 1 ? `All ${cookiePool.length} cookies in pool are cooling down.` : "Wait a moment and retry, or add more cookies separated by commas."}`;
       log?.warn?.("PPLX-WEB", errMsg);
       const errResp = new Response(JSON.stringify({
         error: { message: errMsg, type: "upstream_error", code: `HTTP_${status}` },

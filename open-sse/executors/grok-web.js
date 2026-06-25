@@ -6,6 +6,61 @@ import { sseChunk } from "../utils/sse.js";
 const GROK_CHAT_API = PROVIDERS["grok-web"].baseUrl;
 const GROK_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
+// Cookie pool state per credentials key (in-memory, per-process)
+// cookiePoolState: Map<credentialsKey, { cookies: string[], index: number, cooldowns: Map<cookie, expiry> }>
+const cookiePoolState = new Map();
+
+/**
+ * Parse apiKey menjadi array cookies.
+ * User bisa paste satu atau banyak cookie dipisah koma/newline/semicolon.
+ * Tiap cookie di-strip prefix "sso=" kalau ada.
+ */
+function parseCookiePool(apiKey) {
+  if (!apiKey) return [];
+  return apiKey
+    .split(/[\n,;]+/)
+    .map(c => c.trim())
+    .filter(Boolean)
+    .map(c => c.startsWith("sso=") ? c.slice(4) : c);
+}
+
+/**
+ * Ambil cookie berikutnya dari pool secara round-robin, skip yang sedang cooldown.
+ * @param {string} credKey - unique key untuk credentials (pakai apiKey hash sebagai key)
+ * @param {string[]} cookies - array semua cookies
+ * @returns {string|null} cookie yang dipilih, atau null jika semua cooldown
+ */
+function pickCookie(credKey, cookies) {
+  if (!cookies.length) return null;
+  if (!cookiePoolState.has(credKey)) {
+    cookiePoolState.set(credKey, { index: 0, cooldowns: new Map() });
+  }
+  const state = cookiePoolState.get(credKey);
+  const now = Date.now();
+
+  // Coba tiap cookie mulai dari index saat ini
+  for (let i = 0; i < cookies.length; i++) {
+    const idx = (state.index + i) % cookies.length;
+    const cookie = cookies[idx];
+    const cooldownUntil = state.cooldowns.get(cookie) || 0;
+    if (now >= cooldownUntil) {
+      // Update index ke cookie berikutnya untuk request selanjutnya
+      state.index = (idx + 1) % cookies.length;
+      return cookie;
+    }
+  }
+  return null; // semua cooldown
+}
+
+/**
+ * Tandai cookie sebagai rate-limited, cooldown 60 detik.
+ */
+function cooldownCookie(credKey, cookie, cooldownMs = 60_000) {
+  if (!cookiePoolState.has(credKey)) return;
+  const state = cookiePoolState.get(credKey);
+  state.cooldowns.set(cookie, Date.now() + cooldownMs);
+}
+
 const MODEL_MAP = {
   "grok-3": { grokModel: "grok-3", modelMode: "MODEL_MODE_GROK_3", isThinking: false },
   "grok-3-mini": { grokModel: "grok-3", modelMode: "MODEL_MODE_GROK_3_MINI_THINKING", isThinking: true },
@@ -282,11 +337,18 @@ export class GrokWebExecutor extends BaseExecutor {
       traceparent: `00-${traceId}-${spanId}-00`,
     };
 
-    // Strip "sso=" prefix if user pasted it
-    if (credentials.apiKey) {
-      let token = credentials.apiKey;
-      if (token.startsWith("sso=")) token = token.slice(4);
-      headers["Cookie"] = `sso=${token}`;
+    // Cookie pool: parse apiKey menjadi array, rotate on 429
+    const credKey = credentials.apiKey || "";
+    const cookiePool = parseCookiePool(credKey);
+    const activeCookie = cookiePool.length > 1
+      ? pickCookie(credKey, cookiePool)
+      : (credKey.startsWith("sso=") ? credKey.slice(4) : credKey);
+
+    if (activeCookie) {
+      headers["Cookie"] = `sso=${activeCookie}`;
+      if (cookiePool.length > 1) {
+        log?.debug?.("GROK-WEB", `Cookie pool size=${cookiePool.length}, using cookie[...${activeCookie.slice(-8)}]`);
+      }
     }
 
     log?.info?.("GROK-WEB", `Query to ${model} (grok=${grokModel}, mode=${modelMode}), len=${message.length}`);
@@ -306,9 +368,26 @@ export class GrokWebExecutor extends BaseExecutor {
 
     if (!response.ok) {
       const status = response.status;
+      // 429: tandai cookie ini cooldown, coba cookie lain dari pool
+      if (status === 429 && cookiePool.length > 1 && activeCookie) {
+        cooldownCookie(credKey, activeCookie, 60_000);
+        const nextCookie = pickCookie(credKey, cookiePool);
+        if (nextCookie && nextCookie !== activeCookie) {
+          log?.warn?.("GROK-WEB", `Rate limited on cookie[...${activeCookie.slice(-8)}], rotating to cookie[...${nextCookie.slice(-8)}]`);
+          headers["Cookie"] = `sso=${nextCookie}`;
+          try {
+            const retryResponse = await fetch(GROK_CHAT_API, {
+              method: "POST", headers, body: JSON.stringify(grokPayload), signal,
+            });
+            if (retryResponse.ok || retryResponse.body) {
+              return { response: retryResponse, url: GROK_CHAT_API, headers, transformedBody: grokPayload };
+            }
+          } catch { /* fall through to error */ }
+        }
+      }
       let errMsg = `Grok returned HTTP ${status}`;
       if (status === 401 || status === 403) errMsg = "Grok auth failed — SSO cookie may be expired. Re-paste your sso cookie value from grok.com.";
-      else if (status === 429) errMsg = "Grok rate limited. Wait a moment and retry, or rotate cookies.";
+      else if (status === 429) errMsg = `Grok rate limited. ${cookiePool.length > 1 ? `All ${cookiePool.length} cookies in pool are cooling down.` : "Wait a moment and retry, or add more cookies separated by commas."}`;
       log?.warn?.("GROK-WEB", errMsg);
       const errResp = new Response(JSON.stringify({
         error: { message: errMsg, type: "upstream_error", code: `HTTP_${status}` },
