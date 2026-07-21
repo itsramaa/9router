@@ -31,3 +31,34 @@ export function isBannedError(lastError) {
   const lower = lastError.toLowerCase();
   return BAN_KEYWORDS.some((k) => lower.includes(k));
 }
+
+/** Keywords/substrings that indicate a monthly quota/limit was hit (triggers month-long pause on 402). */
+export const LIMIT_REACHED_KEYWORDS = [
+  "limit reached",
+  "quota exceeded",
+  "quota exhausted",
+  "usage limit",
+  "monthly limit",
+  "monthly quota",
+  "credits exhausted",
+  "insufficient credits",
+  "insufficient balance",
+  "insufficient quota",
+  "billing limit",
+  "plan limit",
+  "rate limit exceeded",
+  "free tier limit",
+  "free quota",
+];
+
+/**
+ * Check if an upstream error indicates the account hit a monthly/free quota/credit limit.
+ * Used to decide whether a 402 should trigger a pause-until-next-month or fall through to the default cooldown.
+ * @param {string|null|undefined} errorText
+ * @returns {boolean}
+ */
+export function isLimitReachedError(errorText) {
+  if (!errorText) return false;
+  const lower = errorText.toLowerCase();
+  return LIMIT_REACHED_KEYWORDS.some((k) => lower.includes(k));
+}

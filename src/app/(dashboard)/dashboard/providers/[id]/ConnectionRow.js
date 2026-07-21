@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import { getStatusVariant as getConnectionStatusVariant } from "@/shared/utils/connectionStatus";
-import { isBannedError } from "@/shared/utils/connectionBanDetect";
-import PropTypes from "prop-types";
 import { Badge, Toggle, Tooltip } from "@/shared/components";
+import { isBannedError } from "@/shared/utils/connectionBanDetect";
+import { getStatusVariant as getConnectionStatusVariant } from "@/shared/utils/connectionStatus";
+import PropTypes from "prop-types";
+import { useEffect, useRef, useState } from "react";
 import CooldownTimer from "./CooldownTimer";
 
 export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onEdit, onDelete, oneByOneStatus = null, autoPing = null }) {
@@ -119,8 +119,9 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
 
   // Additional variables for enhanced status display
   const pausedUntil = connection.pausedUntil || null;
+  const isPaused = pausedUntil && new Date(pausedUntil).getTime() > Date.now();
   const isBanned = connection.isActive === false && isBannedError(connection.lastError);
-  const statusLabel = isBanned ? 'banned' : (connection.isActive === false ? 'disabled' : (effectiveStatus || 'Unknown'));
+  const statusLabel = isBanned ? 'banned' : (isPaused ? 'paused' : (connection.isActive === false ? 'disabled' : (effectiveStatus || 'Unknown')));
 
   const getStatusVariant = () => getConnectionStatusVariant(
     connection.isActive, 
@@ -197,6 +198,7 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
               </Badge>
             )}
             {isCooldown && connection.isActive !== false && <CooldownTimer until={modelLockUntil} />}
+            {isPaused && <CooldownTimer until={pausedUntil} label="until" />}
             {connection.lastError && connection.isActive !== false && (
               <span className="max-w-full truncate text-xs text-red-500 sm:max-w-[300px]" title={connection.lastError}>
                 {connection.lastError}

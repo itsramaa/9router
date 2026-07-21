@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 
 import PropTypes from 'prop-types';
 
-export default function CooldownTimer({ until }) {
+export default function CooldownTimer({ until, label = null }) {
   const [remaining, setRemaining] = useState('');
 
   useEffect(() => {
@@ -46,10 +46,13 @@ export default function CooldownTimer({ until }) {
   if (!remaining) return null;
 
   return (
-    <span className="text-xs text-orange-500 font-mono">⏱ {remaining}</span>
+    <span className="text-xs text-orange-500 font-mono">
+      ⏱ {label ? `${label} ` : ''}{remaining}
+    </span>
   );
 }
 
 CooldownTimer.propTypes = {
   until: PropTypes.string.isRequired,
+  label: PropTypes.string,
 };

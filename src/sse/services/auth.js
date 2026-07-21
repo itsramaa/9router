@@ -1,8 +1,10 @@
-import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
-import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
-import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
+import { getProviderConnections, getProxyPools, getSettings, updateProviderConnection, validateApiKey } from "@/lib/localDb";
+import { pickProxyPoolId, resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
+import { FREE_PROVIDERS, resolveProviderId } from "@/shared/constants/providers.js";
+import { deactivate, pause } from "@/shared/services/accountLifecycle.js";
+import { isBannedError, isLimitReachedError } from "@/shared/utils/connectionBanDetect.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
-import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
+import { buildModelLockUpdate, checkFallbackError, formatRetryAfter, getEarliestModelLockUntil, isModelLockActive } from "open-sse/services/accountFallback.js";
 import * as log from "../utils/logger.js";
 
 // Mutex to prevent race conditions during account selection
@@ -212,6 +214,32 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   const connections = await getProviderConnections({ provider });
   const conn = connections.find(c => c.id === connectionId);
   const backoffLevel = conn?.backoffLevel || 0;
+
+  // 402 with limit/quota/billing-related error text → pause until next month.
+  // Other 402s (transient payment failures, etc.) fall through to the default cooldown.
+  if (status === 402 && isLimitReachedError(errorText)) {
+    const now = new Date();
+    const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const durationMs = nextMonth.getTime() - now.getTime();
+    await pause(connectionId, durationMs);
+    const connName = conn?.displayName || conn?.name || conn?.email || connectionId.slice(0, 8);
+    log.warn("AUTH", `${connName} paused until next month [402] (${errorText})`);
+    if (provider) {
+      console.error(`❌ ${provider} [402]: ${errorText}`);
+    }
+    return { shouldFallback: true, cooldownMs: durationMs };
+  }
+
+  // Handle banned errors: deactivate account permanently
+  if (isBannedError(errorText)) {
+    await deactivate(connectionId, "ban");
+    const connName = conn?.displayName || conn?.name || conn?.email || connectionId.slice(0, 8);
+    log.warn("AUTH", `${connName} deactivated due to ban (${errorText})`);
+    if (provider) {
+      console.error(`❌ ${provider}: ${connName} banned (${errorText})`);
+    }
+    return { shouldFallback: true, cooldownMs: 0 };
+  }
 
   // Provider-specific precise cooldown (e.g. codex usage_limit_reached resets_at) overrides backoff
   let shouldFallback, cooldownMs, newBackoffLevel;
