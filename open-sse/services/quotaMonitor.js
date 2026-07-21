@@ -12,20 +12,20 @@
  */
 
 import {
-  getProviderConnections,
-  updateProviderConnection,
+    getProviderConnections,
+    updateProviderConnection,
 } from '@/lib/localDb';
 
-import { getUsageForProvider } from './usage.js';
-import * as QuotaStore from './quotaStore.js';
-import {
-  activate as lifecycleActivate,
-  pause as lifecyclePause,
-  setQuotaWarning,
-  clearQuotaWarning,
-} from '@/shared/services/accountLifecycle';
 import { resolveConnectionProxyConfig } from '@/lib/network/connectionProxy';
+import {
+    clearQuotaWarning,
+    activate as lifecycleActivate,
+    pause as lifecyclePause,
+    setQuotaWarning
+} from '@/shared/services/accountLifecycle';
+import * as QuotaStore from './quotaStore.js';
 import { refreshTokenByProvider } from './tokenRefresh.js';
+import { getUsageForProvider } from './usage.js';
 
 // Providers that have quota APIs and should be monitored.
 // NOTE: xAI is intentionally excluded — xAI does not expose a public quota/usage API.
@@ -40,6 +40,18 @@ export const QUOTA_SUPPORTED_PROVIDERS = new Set([
   'gemini-cli',
   'antigravity',
   'qoder',
+]);
+
+// Providers without quota APIs — rely solely on time-based resume.
+// These accounts auto-reactivate when their pausedUntil timestamp elapses.
+const TIME_BASED_RESUME_PROVIDERS = new Set([
+  'xai',
+]);
+
+// Union: every provider that should be processed by the time-based resume phase.
+const AUTO_RESUME_PROVIDERS = new Set([
+  ...QUOTA_SUPPORTED_PROVIDERS,
+  ...TIME_BASED_RESUME_PROVIDERS,
 ]);
 
 const MAX_PAUSE_WITHOUT_RESET_MS = 24 * 60 * 60 * 1000; // 24h: default pause when no resetAt
@@ -387,6 +399,31 @@ export async function runQuotaMonitorTick() {
           `[QuotaMonitor] recovery check failed ${provider}/${conn.id.slice(0, 8)}: ${e.message}`
         );
       }
+    }
+  }
+
+  // ── Phase 3: Time-based resume (fallback for Phase 2 + non-quota providers) ──
+  // Auto-activate any paused account whose pausedUntil has passed and that is not
+  // marked as quotaStatus='exhausted' (manual reset required for those).
+  //
+  // Two roles:
+  //   (a) Safety net for QUOTA_SUPPORTED providers: if Phase 2 re-paused an
+  //       account for 24h because the quota API still reported exhaustion,
+  //       this phase resumes it once that 24h elapses.
+  //   (b) Primary recovery for TIME_BASED_RESUME providers (e.g. xAI) that
+  //       have no quota API and are not processed by Phase 2.
+  for (const provider of AUTO_RESUME_PROVIDERS) {
+    try {
+      const resumed = await resumeExpiredPauses(provider);
+      if (resumed.length > 0) {
+        console.log(
+          `[QuotaMonitor] ${provider} time-based resume: ${resumed.length} account(s) reactivated`
+        );
+      }
+    } catch (e) {
+      console.warn(
+        `[QuotaMonitor] time-based resume failed for ${provider}: ${e.message}`
+      );
     }
   }
 }
