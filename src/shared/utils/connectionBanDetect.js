@@ -35,6 +35,7 @@ export function isBannedError(lastError) {
 /** Keywords/substrings that indicate a monthly quota/limit was hit (triggers month-long pause on 402). */
 export const LIMIT_REACHED_KEYWORDS = [
   "limit reached",
+  "reached the limit",
   "quota exceeded",
   "quota exhausted",
   "usage limit",
