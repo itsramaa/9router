@@ -2,11 +2,12 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { getStatusVariant as getConnectionStatusVariant } from "@/shared/utils/connectionStatus";
+import { isBannedError } from "@/shared/utils/connectionBanDetect";
 import PropTypes from "prop-types";
 import { Card, Badge, Button, Modal, Select, Toggle, EditConnectionModal, ConfirmModal } from "@/shared/components";
 
 // ── CooldownTimer ──────────────────────────────────────────────
-function CooldownTimer({ until }) {
+function CooldownTimer({ until, label = null }) {
   const [remaining, setRemaining] = useState("");
 
   useEffect(() => {
@@ -24,10 +25,17 @@ function CooldownTimer({ until }) {
   }, [until]);
 
   if (!remaining) return null;
-  return <span className="text-xs text-orange-500 font-mono">⏱ {remaining}</span>;
+  return (
+    <span className="text-xs text-orange-500 font-mono">
+      ⏱ {label ? `${label} ` : ''}{remaining}
+    </span>
+  );
 }
 
-CooldownTimer.propTypes = { until: PropTypes.string.isRequired };
+CooldownTimer.propTypes = {
+  until: PropTypes.string.isRequired,
+  label: PropTypes.string,
+};
 
 // ── ConnectionRow ──────────────────────────────────────────────
 function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onEdit, onDelete }) {
@@ -87,7 +95,12 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
 
   const effectiveStatus = connection.testStatus === "unavailable" && !isCooldown ? "active" : connection.testStatus;
 
-  const getStatusVariant = () => getConnectionStatusVariant(connection.isActive, effectiveStatus);
+  const pausedUntil = connection.pausedUntil || null;
+  const isPaused = pausedUntil && new Date(pausedUntil).getTime() > Date.now();
+  const isBanned = connection.isActive === false && isBannedError(connection.lastError);
+  const statusLabel = isBanned ? 'banned' : (isPaused ? 'paused' : (connection.isActive === false ? 'disabled' : (effectiveStatus || 'Unknown')));
+
+  const getStatusVariant = () => getConnectionStatusVariant(connection.isActive, effectiveStatus, pausedUntil, connection.lastError);
 
   const displayName = isOAuth
     ? connection.name || connection.email || connection.displayName || "OAuth Account"
