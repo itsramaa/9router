@@ -1,35 +1,34 @@
-import { detectFormat, getTargetFormat, resolveTransport } from "../services/provider.js";
-import { translateRequest } from "../translator/index.js";
-import { stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
-import { FORMATS } from "../translator/formats.js";
-import { normalizeClaudePassthrough } from "../translator/formats/claude.js";
-import { createStreamController } from "../utils/streamHandler.js";
-import { refreshWithRetry } from "../services/tokenRefresh.js";
-import { createRequestLogger } from "../utils/requestLogger.js";
-import { getModelTargetFormat, getModelStrip, getModelUpstreamId, getModelType, PROVIDER_ID_TO_ALIAS } from "../config/providerModels.js";
-import { PROVIDERS } from "../config/providers.js";
-import { createErrorResult, parseUpstreamError, formatProviderError } from "../utils/error.js";
-import { HTTP_STATUS, TOKEN_SAVER_HEADER } from "../config/runtimeConfig.js";
-import { handleBypassRequest } from "../utils/bypassHandler.js";
-import { trackPendingRequest, appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
-import { getExecutor } from "../executors/index.js";
+import { appendRequestLog, saveRequestDetail, trackPendingRequest } from "@/lib/usageDb.js";
 import { supportsGrokCliReasoningEffort } from "../config/grokCli.js";
-import { buildRequestDetail, extractRequestConfig } from "./chatCore/requestDetail.js";
-import { handleForcedSSEToJson } from "./chatCore/sseToJsonHandler.js";
-import { handleNonStreamingResponse } from "./chatCore/nonStreamingHandler.js";
-import { handleStreamingResponse, buildOnStreamComplete } from "./chatCore/streamingHandler.js";
-import { detectClientTool, isNativePassthrough } from "../utils/clientDetector.js";
-import { dedupeTools } from "../utils/toolDeduper.js";
-import { injectCaveman } from "../rtk/caveman.js";
-import { injectPonytail } from "../rtk/ponytail.js";
-import { compressMessages, formatRtkLog } from "../rtk/index.js";
-import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog, isHeadroomPhantomSavings } from "../rtk/headroom.js";
-import { compressWithPxpipe } from "../rtk/pxpipe.js";
+import { getModelStrip, getModelTargetFormat, getModelType, getModelUpstreamId, PROVIDER_ID_TO_ALIAS } from "../config/providerModels.js";
+import { PROVIDERS } from "../config/providers.js";
+import { HTTP_STATUS, TOKEN_SAVER_HEADER } from "../config/runtimeConfig.js";
+import { getExecutor } from "../executors/index.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
+import { injectCaveman } from "../rtk/caveman.js";
+import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog, isHeadroomPhantomSavings } from "../rtk/headroom.js";
+import { compressMessages, formatRtkLog } from "../rtk/index.js";
+import { injectPonytail } from "../rtk/ponytail.js";
+import { compressWithPxpipe } from "../rtk/pxpipe.js";
+import { detectFormat, getTargetFormat, resolveTransport } from "../services/provider.js";
+import { refreshWithRetry } from "../services/tokenRefresh.js";
 import { stripUnsupportedModalities } from "../translator/concerns/modality.js";
 import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
-import { extractThinking } from "../translator/concerns/thinkingUnified.js";
+import { extractThinking, stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
+import { FORMATS } from "../translator/formats.js";
+import { normalizeClaudePassthrough } from "../translator/formats/claude.js";
+import { translateRequest } from "../translator/index.js";
+import { handleBypassRequest } from "../utils/bypassHandler.js";
+import { detectClientTool, isNativePassthrough } from "../utils/clientDetector.js";
+import { createErrorResult, formatProviderError, parseUpstreamError } from "../utils/error.js";
+import { createRequestLogger } from "../utils/requestLogger.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
+import { createStreamController } from "../utils/streamHandler.js";
+import { dedupeTools } from "../utils/toolDeduper.js";
+import { handleNonStreamingResponse } from "./chatCore/nonStreamingHandler.js";
+import { buildRequestDetail, extractRequestConfig } from "./chatCore/requestDetail.js";
+import { handleForcedSSEToJson } from "./chatCore/sseToJsonHandler.js";
+import { buildOnStreamComplete, handleStreamingResponse } from "./chatCore/streamingHandler.js";
 
 /**
  * Core chat handler - shared between SSE and Worker
@@ -208,7 +207,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     if (isHeadroomPhantomSavings(headroomStats, headroomDiagnostics)) {
       log?.warn?.("HEADROOM", `reported token delta, but outbound JSON shrank <5%; provider may bill near-original payload | ${formatHeadroomSizeLog(headroomDiagnostics)}`);
     }
-  } else if (tokenSaverEnabled && headroomEnabled) log?.warn?.("HEADROOM", `skipped: ${headroomDiagnostics.reason || "compression unavailable"}${headroomDiagnostics.endpoint ? ` (${headroomDiagnostics.endpoint})` : ""}`);
+  } else if (tokenSaverEnabled && headroomEnabled) log?.debug?.("HEADROOM", `skipped: ${headroomDiagnostics.reason || "compression unavailable"}${headroomDiagnostics.endpoint ? ` (${headroomDiagnostics.endpoint})` : ""}`);
 
   // Token-saver flags accumulator for the single "⚙" log line below.
   const xf = [];
