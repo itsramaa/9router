@@ -278,6 +278,33 @@ and the return, insert it before the `buildDiagnosis` re-read.
 
 ---
 
+### C11. `open-sse/executors/opencode.js` — low conflict (local-only)
+
+**Change**: `transformRequest` injects a custom system prompt into every
+OpenCode Free request via `injectSystemPrompt` (the shared hook used by
+`rtk/caveman.js` / `rtk/ponytail.js`), after `injectReasoningContent`:
+
+```js
+import { injectSystemPrompt } from "../rtk/systemInject.js";
+import { FORMATS } from "../translator/formats.js";
+
+const OPENCODE_SYSTEM_PROMPT = `...`; // production engineering mode prompt
+
+transformRequest(model, body) {
+  const next = injectReasoningContent({ provider: this.provider, model, body });
+  injectSystemPrompt(next, FORMATS.OPENAI, OPENCODE_SYSTEM_PROMPT);
+  return next;
+}
+```
+
+**Re-apply**: Keep the `injectSystemPrompt(next, FORMATS.OPENAI,
+OPENCODE_SYSTEM_PROMPT)` call after `injectReasoningContent`. If upstream
+rewrites `transformRequest`, port the call into their version. `FORMATS.OPENAI`
+is correct while every model routes to `/zen/v1/chat/completions`; switch to
+`FORMATS.CLAUDE` if `MESSAGES_MODELS` is ever populated.
+
+---
+
 ## DB field compatibility
 
 All new lifecycle fields are stored in the JSON `data` column of
@@ -305,7 +332,7 @@ connection object but never shadow real DB columns.
 After resolving all conflicts:
 
 ```bash
-# Backend (12 files)
+# Backend (13 files)
 node --check src/sse/services/auth.js
 node --check src/lib/db/repos/connectionsRepo.js
 node --check src/lib/db/index.js
@@ -318,6 +345,7 @@ node --check src/shared/services/dailyAccountCheck.js
 node --check open-sse/services/cooldownPolicy.js
 node --check open-sse/services/modelLockStore.js
 node --check open-sse/services/modelLockCleanup.js
+node --check open-sse/executors/opencode.js
 
 # UI (4 files)
 node --check "src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js"
