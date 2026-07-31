@@ -14,20 +14,31 @@ const SETTINGS_RESPONSE_HEADERS = {
 // Secrets must never be mass-assigned from request body (CWE-915)
 const PROTECTED_SETTING_KEYS = ["password", "mitmSudoEncrypted"];
 
+function safeSettingsForResponse(settings) {
+  const { password, oidcClientSecret, proxyFleet, ...rest } = settings;
+  const safe = { ...rest };
+  safe.oidcConfigured = !!(safe.oidcIssuerUrl && safe.oidcClientId && oidcClientSecret);
+  if (proxyFleet && typeof proxyFleet === "object") {
+    // Never leak the fleet API key to the browser; expose only whether it is set.
+    const { apiKey, ...safeProxyFleet } = proxyFleet;
+    safe.proxyFleet = { ...safeProxyFleet, hasApiKey: !!apiKey };
+  }
+  return safe;
+}
+
 export async function GET() {
   try {
     const settings = await getSettings();
-    const { password, oidcClientSecret, ...safeSettings } = settings;
-    safeSettings.oidcConfigured = !!(safeSettings.oidcIssuerUrl && safeSettings.oidcClientId && oidcClientSecret);
-    
+    const safeSettings = safeSettingsForResponse(settings);
+
     const enableRequestLogs = process.env.ENABLE_REQUEST_LOGS === "true";
     const enableTranslator = process.env.ENABLE_TRANSLATOR === "true";
-    
-    return NextResponse.json({ 
-      ...safeSettings, 
+
+    return NextResponse.json({
+      ...safeSettings,
       enableRequestLogs,
       enableTranslator,
-      hasPassword: !!password
+      hasPassword: !!settings.password
     }, { headers: SETTINGS_RESPONSE_HEADERS });
   } catch (error) {
     console.log("Error getting settings:", error);
@@ -78,6 +89,14 @@ export async function PATCH(request) {
 
     const settings = await updateSettings(body);
 
+    // Apply fleet changes immediately: reload config and restart scheduler
+    // (start/stop) so UI edits take effect without a restart.
+    if (Object.prototype.hasOwnProperty.call(body, "proxyFleet")) {
+      import("@/shared/services/proxyFleetSync")
+        .then(({ reconfigureProxyFleetSync }) => reconfigureProxyFleetSync())
+        .catch((error) => console.warn("[FleetSync] settings update failed:", error.message));
+    }
+
     // Apply outbound proxy settings immediately (no restart required)
     if (
       Object.prototype.hasOwnProperty.call(body, "outboundProxyEnabled") ||
@@ -108,8 +127,7 @@ export async function PATCH(request) {
         .catch((error) => console.warn("[AutoPing] settings update failed:", error.message));
     }
 
-    const { password, oidcClientSecret, ...safeSettings } = settings;
-    safeSettings.oidcConfigured = !!(safeSettings.oidcIssuerUrl && safeSettings.oidcClientId && oidcClientSecret);
+    const safeSettings = safeSettingsForResponse(settings);
     return NextResponse.json(safeSettings, { headers: SETTINGS_RESPONSE_HEADERS });
   } catch (error) {
     console.log("Error updating settings:", error);

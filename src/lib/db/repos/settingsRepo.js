@@ -47,6 +47,18 @@ const DEFAULT_SETTINGS = {
   pxpipeAutoInstall: true,
   pxpipeMinChars: 25000,
   pxpipeTimeoutMs: 15000,
+  // Proxy fleet aggregator (UI-configurable; env vars are the startup defaults).
+  proxyFleet: {
+    enabled: process.env.FLEET_ENABLED === "true",
+    baseUrl: process.env.FLEET_URL || "",
+    apiKey: process.env.FLEET_API_KEY || "",
+    pools: process.env.FLEET_POOLS || process.env.FLEET_POOL_ID || "",
+    providers: process.env.FLEET_PROVIDERS || "",
+    batchLimit: parseInt(process.env.FLEET_BATCH_LIMIT || "500", 10),
+    tickIntervalMs: parseInt(process.env.FLEET_INTERVAL_MS || "45000", 10),
+    requestTimeoutMs: parseInt(process.env.FLEET_TIMEOUT_MS || "5000", 10),
+    reportBatchSize: parseInt(process.env.FLEET_REPORT_BATCH_SIZE || "100", 10),
+  },
 };
 
 async function readRaw() {
@@ -86,7 +98,20 @@ export async function updateSettings(updates) {
   db.transaction(() => {
     const row = db.get(`SELECT data FROM settings WHERE id = 1`);
     const current = row ? parseJson(row.data, {}) : {};
-    next = { ...current, ...updates };
+    const mergedUpdates = { ...updates };
+
+    // Deep-merge nested groups: a partial PATCH (e.g. only proxyFleet.enabled)
+    // must not wipe the other proxyFleet fields stored earlier.
+    if (mergedUpdates.proxyFleet && typeof mergedUpdates.proxyFleet === "object") {
+      const prev = (current.proxyFleet && typeof current.proxyFleet === "object" ? current.proxyFleet : {});
+      mergedUpdates.proxyFleet = { ...prev, ...mergedUpdates.proxyFleet };
+      // UI cannot see the stored key; empty string means "leave unchanged".
+      if (mergedUpdates.proxyFleet.apiKey === "") {
+        delete mergedUpdates.proxyFleet.apiKey;
+      }
+    }
+
+    next = { ...current, ...mergedUpdates };
     db.run(
       `INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`,
       [stringifyJson(next)]

@@ -62,6 +62,33 @@ export const CONSOLE_LOG_CONFIG = {
 // Client-side store TTL: how long fetched data stays fresh before re-fetching
 export const CLIENT_STORE_TTL_MS = 60000;
 
+// Proxy fleet aggregator: sync fleet-owned proxies into local proxy pools with
+// one batch request per fleet pool instead of one HTTP check per proxy.
+// Fire-and-forget.
+export const PROXY_FLEET_CONFIG = {
+  enabled: process.env.FLEET_ENABLED === "true",
+  baseUrl: (process.env.FLEET_URL || "").replace(/\/+$/, ""),
+  apiKey: process.env.FLEET_API_KEY || "",
+  // Comma-separated fleet pool IDs (client must be allowed on each).
+  // Example: "mimo,opencode,default"
+  pools: (process.env.FLEET_POOLS || process.env.FLEET_POOL_ID || "default")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+  batchLimit: parseInt(process.env.FLEET_BATCH_LIMIT || "500", 10),
+  tickIntervalMs: parseInt(process.env.FLEET_INTERVAL_MS || "45000", 10),
+  requestTimeoutMs: parseInt(process.env.FLEET_TIMEOUT_MS || "5000", 10),
+  reportBatchSize: parseInt(process.env.FLEET_REPORT_BATCH_SIZE || "100", 10),
+  // Provider IDs whose upstream failures (429/rate limit) mark the used fleet
+  // proxy as exhausted and queue it for the batch report.
+  providers: (process.env.FLEET_PROVIDERS || "opencode-go,xiaomi-mimo")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
+  // Local proxy pool naming prefix for fleet-assigned proxies.
+  localPoolPrefix: "fleet:",
+};
+
 // Quota auto-ping: keep 5h windows warm by sending a tiny request right after reset.
 export const QUOTA_AUTOPING_CONFIG = {
   tickIntervalMs: 60000,                // scheduler tick

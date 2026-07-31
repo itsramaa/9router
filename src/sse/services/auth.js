@@ -27,6 +27,7 @@ import {
   pause as lifecyclePause,
   resumeExpiredPauses,
 } from "@/shared/services/accountLifecycle.js";
+import { maybeReportFleetExhaustion } from "@/shared/services/proxyFleetSync.js";
 import {
   resolveProviderId,
   FREE_PROVIDERS,
@@ -332,6 +333,10 @@ export async function markAccountUnavailable(
     resolveCooldown(status, errorText, backoffLevel, resetsAtMs);
 
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
+
+  // Fleet-owned proxies: queue the used proxy for the next batch exhaustion
+  // report so the fleet can rotate it (fail-open, fire-and-forget).
+  maybeReportFleetExhaustion({ provider, connection: conn, status, errorText }).catch(() => {});
 
   const reason =
     typeof errorText === "string" ? errorText.slice(0, 100) : "Provider error";

@@ -113,6 +113,11 @@ async function runHeavyStartup() {
       .catch((e) => console.log("[AutoPing] scheduler start failed:", e.message));
   }
 
+  // Proxy fleet aggregator (env-gated). Fail-open: never blocks startup.
+  import("@/shared/services/proxyFleetSync")
+    .then(({ startProxyFleetSync }) => startProxyFleetSync())
+    .catch((e) => console.log("[FleetSync] scheduler start failed:", e.message));
+
   // Account lifecycle background jobs (plain intervals — no usageScheduler in upstream)
   startLifecycleJobs();
 }

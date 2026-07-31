@@ -51,6 +51,9 @@ export default function ProxyPoolsPage() {
   const [healthProgress, setHealthProgress] = useState({ current: 0, total: 0 });
   const [bulkBusy, setBulkBusy] = useState(false);
   const [confirmState, setConfirmState] = useState(null);
+  const [fleet, setFleet] = useState(null);
+  const [fleetForm, setFleetForm] = useState(null);
+  const [fleetSaving, setFleetSaving] = useState(false);
   const relayMenuRef = useRef(null);
   const notify = useNotificationStore();
 
@@ -80,9 +83,67 @@ export default function ProxyPoolsPage() {
     }
   }, []);
 
+  const fetchFleetSettings = useCallback(async () => {
+    try {
+      const res = await fetch("/api/settings", { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok && data.proxyFleet) {
+        setFleet(data.proxyFleet);
+        setFleetForm({
+          enabled: data.proxyFleet.enabled === true,
+          baseUrl: data.proxyFleet.baseUrl || "",
+          apiKey: "", // never sent back by the server
+          pools: data.proxyFleet.pools || "",
+          providers: data.proxyFleet.providers || "",
+          batchLimit: data.proxyFleet.batchLimit || 500,
+          tickIntervalMs: data.proxyFleet.tickIntervalMs || 45000,
+        });
+      }
+    } catch (error) {
+      console.log("Error fetching fleet settings:", error);
+    }
+  }, []);
+
+  const handleSaveFleet = async () => {
+    setFleetSaving(true);
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          proxyFleet: {
+            enabled: fleetForm.enabled === true,
+            baseUrl: fleetForm.baseUrl.trim(),
+            apiKey: fleetForm.apiKey.trim(), // empty = keep existing
+            pools: fleetForm.pools.trim(),
+            providers: fleetForm.providers.trim(),
+            batchLimit: Number(fleetForm.batchLimit) || 500,
+            tickIntervalMs: Number(fleetForm.tickIntervalMs) || 45000,
+          },
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setFleet(data.proxyFleet);
+        setFleetForm((prev) => ({ ...prev, apiKey: "" }));
+        notify.success("Proxy fleet settings saved");
+      } else {
+        notify.error(data.error || "Failed to save proxy fleet settings");
+      }
+    } catch (error) {
+      console.log("Error saving proxy fleet settings:", error);
+      notify.error("Failed to save proxy fleet settings");
+    } finally {
+      setFleetSaving(false);
+    }
+  };
+
+  const fleetConnected = fleet?.hasApiKey === true || !!fleetForm?.baseUrl;
+
   useEffect(() => {
     fetchProxyPools();
-  }, [fetchProxyPools]);
+    fetchFleetSettings();
+  }, [fetchProxyPools, fetchFleetSettings]);
 
   const resetForm = () => {
     setEditingProxyPool(null);
@@ -635,6 +696,137 @@ export default function ProxyPoolsPage() {
           <Button size="sm" icon="add" onClick={openCreateModal}>Add Proxy Pool</Button>
         </div>
       </div>
+
+      {/* Proxy Fleet aggregator settings (UI-configurable; env vars are startup defaults) */}
+      <Card>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold">Proxy Fleet</h2>
+            <p className="text-xs text-text-muted mt-0.5">
+              Sync proxies from a fleet aggregator into local pools (one batch request per pool).
+              Values here override the FLEET_* environment variables until cleared.
+            </p>
+          </div>
+          <Badge variant={fleetConnected ? "success" : "default"} size="sm" dot>
+            {fleetConnected ? (fleet?.enabled ? "configured & running" : "configured (off)") : "not configured"}
+          </Badge>
+        </div>
+
+        {fleetForm ? (
+          <div className="mt-4 flex flex-col gap-4">
+            <div className="flex flex-col gap-3 rounded-lg border border-border/50 p-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="font-medium text-sm">Enable fleet sync</p>
+                <p className="text-xs text-text-muted">Periodically pull proxy batches and report exhausted proxies.</p>
+              </div>
+              <Toggle
+                checked={fleetForm.enabled === true}
+                onChange={() => setFleetForm((prev) => ({ ...prev, enabled: !prev.enabled }))}
+                disabled={fleetSaving}
+              />
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Input
+                label="Fleet Base URL"
+                value={fleetForm.baseUrl}
+                onChange={(e) => setFleetForm((prev) => ({ ...prev, baseUrl: e.target.value }))}
+                placeholder="http://localhost:8080"
+                hint="Base URL of the fleet aggregator API."
+              />
+              <Input
+                label="API Key"
+                type="password"
+                value={fleetForm.apiKey}
+                onChange={(e) => setFleetForm((prev) => ({ ...prev, apiKey: e.target.value }))}
+                placeholder={fleet?.hasApiKey ? "•••••••• (leave empty to keep)" : "Fleet API key"}
+                hint={fleet?.hasApiKey ? "An API key is already saved; leaving this empty keeps it." : "Required to authenticate with the fleet."}
+              />
+              <Input
+                label="Pool IDs (comma-separated)"
+                value={fleetForm.pools}
+                onChange={(e) => setFleetForm((prev) => ({ ...prev, pools: e.target.value }))}
+                placeholder="mimo,opencode"
+                hint="One batch request per pool. Example: mimo,opencode,default"
+              />
+              <Input
+                label="Providers (comma-separated)"
+                value={fleetForm.providers}
+                onChange={(e) => setFleetForm((prev) => ({ ...prev, providers: e.target.value }))}
+                placeholder="opencode-go,xiaomi-mimo"
+                hint="Upstream failures (429/quota) on these providers mark the fleet proxy as exhausted."
+              />
+              <Input
+                label="Batch Limit"
+                type="number"
+                min="1"
+                value={fleetForm.batchLimit}
+                onChange={(e) => setFleetForm((prev) => ({ ...prev, batchLimit: e.target.value }))}
+                hint="Max proxies fetched per pool per sync."
+              />
+              <Input
+                label="Sync Interval (ms)"
+                type="number"
+                min="30000"
+                value={fleetForm.tickIntervalMs}
+                onChange={(e) => setFleetForm((prev) => ({ ...prev, tickIntervalMs: e.target.value }))}
+                hint="How often to pull batches (min 30000)."
+              />
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                onClick={() => { setFleetForm(null); fetchFleetSettings(); }}
+                disabled={fleetSaving}
+              >
+                Cancel
+              </Button>
+              <Button
+                icon="save"
+                onClick={handleSaveFleet}
+                disabled={fleetSaving || !fleetForm.baseUrl.trim() || (fleetForm.enabled === true && !fleet?.hasApiKey && !fleetForm.apiKey.trim())}
+              >
+                {fleetSaving ? "Saving..." : "Save Fleet Settings"}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              icon="settings"
+              onClick={() => setFleetForm({
+                enabled: fleet?.enabled === true,
+                baseUrl: fleet?.baseUrl || "",
+                apiKey: "",
+                pools: fleet?.pools || "",
+                providers: fleet?.providers || "",
+                batchLimit: fleet?.batchLimit || 500,
+                tickIntervalMs: fleet?.tickIntervalMs || 45000,
+              })}
+            >
+              Configure
+            </Button>
+            {fleet?.enabled && (
+              <Button
+                size="sm"
+                variant="secondary"
+                icon="sync"
+                onClick={async () => {
+                  notify.info("Syncing fleet proxies now...");
+                  const res = await fetch("/api/fleet/sync-now", { method: "POST" });
+                  const data = await res.json().catch(() => null);
+                  notify[res.ok ? "success" : "error"](res.ok ? `Fleet sync done: ${data?.message || "ok"}` : (data?.error || "Fleet sync failed"));
+                }}
+              >
+                Sync Now
+              </Button>
+            )}
+          </div>
+        )}
+      </Card>
 
       <Card>
         <div className="mb-4 flex flex-wrap items-center gap-2">
