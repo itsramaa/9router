@@ -462,11 +462,15 @@ immediate-apply blocks (`applyOutboundProxyEnv`, `resetComboRotation`,
 
 **Change**: Added a "Proxy Fleet" card above the proxy-pool list:
 - Toggle enable, Base URL, API key (password field, empty = keep stored key),
-  Pool IDs, Providers, Batch Limit, Sync Interval.
+  Pool IDs, Providers, Batch Limit, Sync Interval, Request Timeout,
+  Report Batch Size.
 - Reads via `GET /api/settings` (`data.proxyFleet`), saves via
   `PATCH /api/settings` with a nested `proxyFleet` object.
 - Badge shows configured/running state; "Sync Now" button hits
   `POST /api/fleet/sync-now`.
+- Every `proxyFleet` field in `.env.example` (FLEET_ENABLED/URL/API_KEY/POOLS/
+  PROVIDERS/BATCH_LIMIT/INTERVAL_MS/TIMEOUT_MS/REPORT_BATCH_SIZE) maps to a
+  form field; env values are the startup defaults, saved settings override them.
 
 **Re-apply**: The card is self-contained — only depends on `Badge`, `Button`,
 `Card`, `Input`, `Toggle`, `useNotificationStore` (all already imported).

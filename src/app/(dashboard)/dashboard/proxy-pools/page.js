@@ -97,6 +97,8 @@ export default function ProxyPoolsPage() {
           providers: data.proxyFleet.providers || "",
           batchLimit: data.proxyFleet.batchLimit || 500,
           tickIntervalMs: data.proxyFleet.tickIntervalMs || 45000,
+          requestTimeoutMs: data.proxyFleet.requestTimeoutMs || 5000,
+          reportBatchSize: data.proxyFleet.reportBatchSize || 100,
         });
       }
     } catch (error) {
@@ -119,6 +121,8 @@ export default function ProxyPoolsPage() {
             providers: fleetForm.providers.trim(),
             batchLimit: Number(fleetForm.batchLimit) || 500,
             tickIntervalMs: Number(fleetForm.tickIntervalMs) || 45000,
+            requestTimeoutMs: Number(fleetForm.requestTimeoutMs) || 5000,
+            reportBatchSize: Number(fleetForm.reportBatchSize) || 100,
           },
         }),
       });
@@ -772,6 +776,22 @@ export default function ProxyPoolsPage() {
                 onChange={(e) => setFleetForm((prev) => ({ ...prev, tickIntervalMs: e.target.value }))}
                 hint="How often to pull batches (min 30000)."
               />
+              <Input
+                label="Request Timeout (ms)"
+                type="number"
+                min="1000"
+                value={fleetForm.requestTimeoutMs}
+                onChange={(e) => setFleetForm((prev) => ({ ...prev, requestTimeoutMs: e.target.value }))}
+                hint="Timeout for fleet API calls."
+              />
+              <Input
+                label="Report Batch Size"
+                type="number"
+                min="1"
+                value={fleetForm.reportBatchSize}
+                onChange={(e) => setFleetForm((prev) => ({ ...prev, reportBatchSize: e.target.value }))}
+                hint="Max exhausted proxies per report batch."
+              />
             </div>
 
             <div className="flex justify-end gap-2">
@@ -805,6 +825,8 @@ export default function ProxyPoolsPage() {
                 providers: fleet?.providers || "",
                 batchLimit: fleet?.batchLimit || 500,
                 tickIntervalMs: fleet?.tickIntervalMs || 45000,
+                requestTimeoutMs: fleet?.requestTimeoutMs || 5000,
+                reportBatchSize: fleet?.reportBatchSize || 100,
               })}
             >
               Configure
