@@ -1,3 +1,8 @@
+# Unreleased
+
+## Features
+- **OAuth**: add POST /api/oauth/trae/import route to ingest Trae refresh tokens from an external orchestrator
+
 # v0.5.45 (2026-07-30)
 
 ## Features
