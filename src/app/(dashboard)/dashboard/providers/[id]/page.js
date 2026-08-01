@@ -294,7 +294,7 @@ export default function ProviderDetailPage() {
       const [connectionsRes, nodesRes, proxyPoolsRes, settingsRes] = await Promise.all([
         fetch("/api/providers", { cache: "no-store" }),
         fetch("/api/provider-nodes", { cache: "no-store" }),
-        fetch("/api/proxy-pools?isActive=true", { cache: "no-store" }),
+        fetch("/api/proxy-pools", { cache: "no-store" }),
         fetch("/api/settings", { cache: "no-store" }),
       ]);
       const connectionsData = await connectionsRes.json();

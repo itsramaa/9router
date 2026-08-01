@@ -1,6 +1,6 @@
 export default {
   id: "iflow",
-  hidden: true,
+  hidden: false,
   priority: 110,
   alias: "if",
   display: {

@@ -370,15 +370,40 @@ export default function ConnectionRow({
                   >
                     None
                   </button>
-                  {(proxyPools || []).map((pool) => (
-                    <button
-                      key={pool.id}
-                      onClick={() => handleSelectProxy(pool.id)}
-                      className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 ${boundProxyPoolId === pool.id ? "text-primary font-medium" : "text-text-main"}`}
-                    >
-                      {pool.name}
-                    </button>
-                  ))}
+                  {(proxyPools || [])
+                    .filter((pool) => pool.type === "http" || pool.type === "fleet")
+                    .map((pool) => {
+                      const isFleet = pool.type === "fleet";
+                      let activeProxyCount = 0;
+                      let showWarning = false;
+                      if (isFleet && pool.proxyUrls && pool.exhaustedProxies) {
+                        activeProxyCount = pool.proxyUrls.length - pool.exhaustedProxies.length;
+                        showWarning = activeProxyCount === 0;
+                      }
+                      const poolLabel = isFleet
+                        ? `${pool.name} (${activeProxyCount} active ${activeProxyCount === 1 ? "proxy" : "proxies"})`
+                        : pool.name;
+
+                      return (
+                        <button
+                          key={pool.id}
+                          onClick={() => handleSelectProxy(pool.id)}
+                          disabled={pool.isActive === false}
+                          className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 ${boundProxyPoolId === pool.id ? "text-primary font-medium" : "text-text-main"} ${pool.isActive === false ? "opacity-50 cursor-not-allowed" : ""}`}
+                          title={showWarning ? "Warning: No active proxies available" : ""}
+                        >
+                          <span className="flex items-center gap-2">
+                            <span className={showWarning ? "text-orange-500" : ""}>{poolLabel}</span>
+                            {pool.isActive === false && (
+                              <span className="text-[10px] text-text-muted">(inactive)</span>
+                            )}
+                            {showWarning && (
+                              <span className="text-[10px] text-orange-500">⚠</span>
+                            )}
+                          </span>
+                        </button>
+                      );
+                    })}
                 </div>
               )}
             </div>

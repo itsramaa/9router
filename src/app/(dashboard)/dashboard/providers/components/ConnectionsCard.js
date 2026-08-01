@@ -189,9 +189,35 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
               {showProxyDropdown && (
                 <div className="absolute right-0 top-full mt-1 z-50 bg-bg border border-border rounded-lg shadow-lg py-1 min-w-[160px]">
                   <button onClick={() => handleSelectProxy("__none__")} className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 ${!boundProxyPoolId ? "text-primary font-medium" : "text-text-main"}`}>None</button>
-                  {(proxyPools || []).map((pool) => (
-                    <button key={pool.id} onClick={() => handleSelectProxy(pool.id)} className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 ${boundProxyPoolId === pool.id ? "text-primary font-medium" : "text-text-main"}`}>{pool.name}</button>
-                  ))}
+                  {(proxyPools || [])
+                    .filter((pool) => pool.type === "http" || pool.type === "fleet")
+                    .map((pool) => {
+                      const isFleet = pool.type === "fleet";
+                      let activeProxyCount = 0;
+                      let showWarning = false;
+                      if (isFleet && pool.proxyUrls && pool.exhaustedProxies) {
+                        activeProxyCount = pool.proxyUrls.length - pool.exhaustedProxies.length;
+                        showWarning = activeProxyCount === 0;
+                      }
+                      const poolLabel = isFleet
+                        ? `${pool.name} (${activeProxyCount} active ${activeProxyCount === 1 ? "proxy" : "proxies"})`
+                        : pool.name;
+
+                      return (
+                        <button
+                          key={pool.id}
+                          onClick={() => handleSelectProxy(pool.id)}
+                          disabled={pool.isActive === false}
+                          className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 ${boundProxyPoolId === pool.id ? "text-primary font-medium" : "text-text-main"} ${pool.isActive === false || showWarning ? "opacity-50" : ""}`}
+                          title={showWarning ? "Warning: No active proxies available" : ""}
+                        >
+                          <span className="flex items-center gap-1">
+                            <span className={showWarning ? "text-orange-500" : ""}>{poolLabel}</span>
+                            {showWarning && <span className="text-[10px] text-orange-500">⚠</span>}
+                          </span>
+                        </button>
+                      );
+                    })}
                 </div>
               )}
             </div>
@@ -313,7 +339,22 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
           <input type="number" className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary" value={formData.priority} onChange={(e) => setFormData({ ...formData, priority: Number.parseInt(e.target.value) || 1 })} />
         </div>
         <Select label="Proxy Pool" value={formData.proxyPoolId} onChange={(e) => setFormData({ ...formData, proxyPoolId: e.target.value })}
-          options={[{ value: NONE, label: "None" }, ...(proxyPools || []).map((p) => ({ value: p.id, label: p.name }))]} />
+          options={[
+            { value: NONE, label: "None" },
+            ...(proxyPools || [])
+              .filter((p) => p.type === "http" || p.type === "fleet")
+              .map((p) => {
+                const isFleet = p.type === "fleet";
+                let activeProxyCount = 0;
+                if (isFleet && p.proxyUrls && p.exhaustedProxies) {
+                  activeProxyCount = p.proxyUrls.length - p.exhaustedProxies.length;
+                }
+                const label = isFleet
+                  ? `${p.name} (${activeProxyCount} active ${activeProxyCount === 1 ? "proxy" : "proxies"})`
+                  : p.name;
+                return { value: p.id, label };
+              })
+          ]} />
         <div className="flex gap-2">
           <Button onClick={handleSubmit} fullWidth disabled={!formData.name || !formData.apiKey || saving}>
             {saving ? "Saving..." : "Save"}

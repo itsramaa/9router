@@ -26,6 +26,9 @@ export {
 export {
   getProxyPools, getProxyPoolById,
   createProxyPool, updateProxyPool, deleteProxyPool,
+  // Fleet pool functions
+  getFleetPoolByFleetId, createFleetPool, updateFleetPoolProxies,
+  markProxyExhausted, getActiveProxies, rotateProxy,
 } from "./repos/proxyPoolsRepo.js";
 
 // API keys

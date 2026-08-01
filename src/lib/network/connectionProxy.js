@@ -1,4 +1,5 @@
 import { getProxyPoolById } from "@/models";
+import { rotateProxy } from "@/lib/db/repos/proxyPoolsRepo";
 
 // Safely normalize any value into a trimmed string.
 function normalizeString(value) {
@@ -112,6 +113,46 @@ export async function resolveConnectionProxyConfig(
             strictProxy: proxyPool.strictProxy === true,
 
             vercelRelayUrl: proxyUrl, // Still mapped to vercelRelayUrl in the unified payload since they use the exact same header spec
+          };
+        }
+
+        /**
+         * Fleet pool (proxy-fleet aggregator with round-robin rotation)
+         */
+        if (proxyPool.type === "fleet") {
+          const proxyUrls = proxyPool.proxyUrls || [];
+          const exhaustedProxies = proxyPool.exhaustedProxies || [];
+          const currentIndex = proxyPool.currentIndex || 0;
+
+          // Filter active (non-exhausted) proxies
+          const activeProxies = proxyUrls.filter(url => !exhaustedProxies.includes(url));
+
+          if (activeProxies.length === 0) {
+            throw new Error(
+              `Fleet pool "${proxyPool.name}" (${proxyPoolId}) has no available proxies. ` +
+              `All ${proxyUrls.length} proxies are exhausted.`
+            );
+          }
+
+          // Pick current proxy using round-robin (modulo arithmetic)
+          const currentUrl = activeProxies[currentIndex % activeProxies.length];
+
+          // Rotate to next proxy (async, non-blocking, fire-and-forget)
+          rotateProxy(proxyPoolId).catch(err => {
+            console.error(`[Fleet Pool] Failed to rotate proxy for pool ${proxyPoolId}:`, err);
+          });
+
+          return {
+            source: "fleet",
+
+            proxyPoolId,
+            proxyPool,
+
+            connectionProxyEnabled: true,
+            connectionProxyUrl: currentUrl,
+            connectionNoProxy: noProxy,
+
+            strictProxy: true, // Fleet pools always use strict proxy
           };
         }
 

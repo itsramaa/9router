@@ -1,6 +1,6 @@
 export default {
   id: "qwen",
-  hidden: true,
+  hidden: false,
   priority: 130,
   alias: "qw",
   display: {

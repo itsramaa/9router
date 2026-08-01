@@ -2,7 +2,7 @@
 // Hidden until/unless a replacement (OAuth MiMo Platform) is wired.
 export default {
   id: "mimo-free",
-  hidden: true,
+  hidden: false,
   priority: 50,
   hasFree: true,
   alias: "mmf",

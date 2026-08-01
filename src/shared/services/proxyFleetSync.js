@@ -15,7 +15,17 @@
 
 import { fetch as undiciFetch } from "undici";
 
-import { getProxyPoolById, getProxyPools, updateProxyPool, createProxyPool, getSettings } from "@/lib/localDb";
+import { 
+  getProxyPoolById, 
+  getProxyPools, 
+  updateProxyPool, 
+  createProxyPool, 
+  getSettings,
+  getFleetPoolByFleetId,
+  createFleetPool,
+  updateFleetPoolProxies,
+  markProxyExhausted
+} from "@/lib/db/index.js";
 import { PROXY_FLEET_CONFIG } from "@/shared/constants/config";
 
 const C = PROXY_FLEET_CONFIG;
@@ -30,8 +40,6 @@ const g = (global.__proxyFleetSync ??= {
   settings: null,
   // proxy_url → assignment_id, kept so exhausted reports carry assignment ids.
   assignmentByUrl: new Map(),
-  // proxy_url → { failedAt } for local cooldown before reporting to fleet.
-  exhaustedPending: new Map(),
 });
 
 /** Normalize comma-separated list from settings/env into a non-empty array. */
@@ -119,17 +127,9 @@ async function requestFleet(path, options = {}) {
   }
 }
 
-function isFleetPool(pool) {
-  return Boolean(pool?.name?.startsWith?.(cfg().localPoolPrefix));
-}
-
-function poolKey(pool) {
-  return (pool?.proxyUrl || "").trim();
-}
-
 /**
  * Fetch a batch of active proxies from one fleet pool and upsert them into
- * local proxy pools. Returns { added, updated, assignments } for logging.
+ * a single local fleet pool with rotation. Returns { ok, added, updated } for logging.
  */
 export async function syncFleetPool(poolId) {
   const c = cfg();
@@ -138,77 +138,61 @@ export async function syncFleetPool(poolId) {
 
   if (!res.ok) {
     g.lastError = res.error;
-    return { ok: false, error: res.error, added: 0, updated: 0, assignments: 0 };
+    return { ok: false, error: res.error, added: 0, updated: 0 };
   }
 
   const proxies = Array.isArray(res.data?.proxies) ? res.data.proxies : [];
   const assignments = Array.isArray(res.data?.assignments) ? res.data.assignments : [];
+  
+  // Store assignment IDs for exhaustion reporting
   const assignmentByUrl = new Map();
   for (const a of assignments) {
-    if (a?.proxy_url) assignmentByUrl.set(a.proxy_url, a.id || "");
-  }
-
-  const existing = await getProxyPools();
-  const byUrl = new Map();
-  for (const p of existing) byUrl.set(poolKey(p), p);
-
-  let added = 0;
-  let updated = 0;
-  const now = new Date().toISOString();
-
-  for (const rawUrl of proxies) {
-    const proxyUrl = String(rawUrl || "").trim();
-    if (!proxyUrl) continue;
-
-    const assignmentId = assignmentByUrl.get(proxyUrl) || "";
-    if (assignmentId) assignmentByUrl.set(proxyUrl, assignmentId);
-
-    const existingPool = byUrl.get(proxyUrl);
-    if (existingPool) {
-      if (existingPool.testStatus !== "active" || existingPool.isActive !== true) {
-        await updateProxyPool(existingPool.id, {
-          testStatus: "active",
-          isActive: true,
-          lastTestedAt: now,
-          lastError: null,
-          updatedAt: now,
-        });
-        updated += 1;
-      }
-    } else {
-      const hostLabel = safeHostLabel(proxyUrl);
-      await createProxyPool({
-        name: `${c.localPoolPrefix}${hostLabel}`,
-        proxyUrl,
-        noProxy: "",
-        type: "http",
-        isActive: true,
-        strictProxy: false,
-        testStatus: "active",
-        lastTestedAt: now,
-        lastError: null,
-      });
-      added += 1;
+    if (a?.proxy_url) {
+      assignmentByUrl.set(a.proxy_url, a.id || "");
+      g.assignmentByUrl.set(a.proxy_url, a.id || "");
     }
   }
 
-  for (const [url, assignmentId] of assignmentByUrl) {
-    g.assignmentByUrl.set(url, assignmentId);
+  const newProxies = proxies.map(url => String(url || "").trim()).filter(Boolean);
+  if (newProxies.length === 0) {
+    return { ok: true, error: null, added: 0, updated: 0 };
   }
+
+  // Find existing fleet pool
+  const existingPool = await getFleetPoolByFleetId(poolId);
+  
+  let added = 0;
+  let updated = 0;
+
+  if (!existingPool) {
+    // Create new fleet pool
+    await createFleetPool(poolId, newProxies);
+    added = newProxies.length;
+  } else {
+    // Merge: existing active proxies + new proxies, deduplicate
+    const existingActive = (existingPool.proxyUrls || []).filter(
+      url => !(existingPool.exhaustedProxies || []).includes(url)
+    );
+    const merged = [...new Set([...existingActive, ...newProxies])];
+    
+    await updateFleetPoolProxies(existingPool.id, merged);
+    added = merged.length - existingActive.length;
+    updated = existingActive.length;
+  }
+
   g.lastError = null;
-  return { ok: true, error: null, added, updated, assignments: proxies.length };
+  return { ok: true, error: null, added, updated };
 }
 
 /** Sync every configured fleet pool; per-pool requests stay isolated. */
 export async function syncFleetProxies() {
   const c = cfg();
-  const totals = { ok: 0, failed: 0, added: 0, updated: 0, assignments: 0 };
+  const totals = { ok: 0, failed: 0, added: 0, updated: 0 };
   for (const poolId of c.pools) {
     try {
       const r = await syncFleetPool(poolId);
       totals.added += r.added;
       totals.updated += r.updated;
-      totals.assignments += r.assignments;
       if (r.ok) totals.ok += 1;
       else {
         totals.failed += 1;
@@ -223,6 +207,60 @@ export async function syncFleetProxies() {
   return { ok: totals.failed === 0, ...totals };
 }
 
+/**
+ * Check if fleet pool has exhausted proxies and report them to fleet.
+ * Returns { ok, shouldSync } - shouldSync=true means we need fresh proxies.
+ */
+async function checkAndReportExhausted(poolId) {
+  try {
+    const pool = await getFleetPoolByFleetId(poolId);
+    if (!pool) {
+      return { ok: true, shouldSync: true };
+    }
+
+    const proxyUrls = pool.proxyUrls || [];
+    const exhaustedProxies = pool.exhaustedProxies || [];
+    const activeCount = proxyUrls.length - exhaustedProxies.length;
+
+    // If we have enough active proxies, no need to sync yet
+    if (activeCount > 100) {
+      return { ok: true, shouldSync: false };
+    }
+
+    // Report exhausted proxies if any
+    if (exhaustedProxies.length > 0) {
+      const reports = exhaustedProxies.map(url => ({
+        assignment_id: g.assignmentByUrl.get(url) || "",
+        proxy_url: url,
+        reason: "upstream_rate_limited",
+      }));
+
+      const res = await requestFleet("/api/v1/proxy/report-exhausted/batch", {
+        method: "POST",
+        body: JSON.stringify({ reports }),
+      });
+
+      if (!res.ok) {
+        g.lastError = res.error;
+        return { ok: false, shouldSync: true, error: res.error };
+      }
+
+      // Clear exhausted proxies after successful report
+      await updateFleetPoolProxies(pool.id, proxyUrls.filter(url => !exhaustedProxies.includes(url)));
+      
+      // Clear from assignment tracking
+      for (const url of exhaustedProxies) {
+        g.assignmentByUrl.delete(url);
+      }
+    }
+
+    return { ok: true, shouldSync: true };
+  } catch (e) {
+    console.warn(`[FleetSync] checkAndReportExhausted pool=${poolId} error: ${e?.message || e}`);
+    return { ok: false, shouldSync: true, error: e?.message || String(e) };
+  }
+}
+
 function safeHostLabel(proxyUrl) {
   try {
     const u = new URL(proxyUrl);
@@ -233,76 +271,9 @@ function safeHostLabel(proxyUrl) {
 }
 
 /**
- * Mark a fleet proxy as locally exhausted. It is queued in memory and reported
- * to the fleet on the next tick (or when the queue is full enough).
- * Fail-open: unknown/non-fleet URLs are ignored.
- */
-export function markFleetProxyExhausted(proxyUrl, { reason = "upstream_rate_limited", assignmentId = "" } = {}) {
-  const url = String(proxyUrl || "").trim();
-  if (!url || !isFleetEnabled()) return;
-
-  const pending = g.exhaustedPending.get(url);
-  if (pending) return; // already queued
-  g.exhaustedPending.set(url, {
-    assignmentId: assignmentId || g.assignmentByUrl.get(url) || "",
-    reason: reason || "upstream_rate_limited",
-    failedAt: Date.now(),
-  });
-}
-
-/**
- * Report queued exhausted proxies to the fleet in one batch request, then
- * deactivate the corresponding local pools. Fire-and-forget.
- */
-export async function flushExhaustedReports() {
-  if (g.exhaustedPending.size === 0) return { ok: true, reported: 0 };
-
-  const items = [];
-  for (const [url, pending] of g.exhaustedPending) {
-    items.push({
-      assignment_id: pending.assignmentId || "",
-      proxy_url: url,
-      reason: pending.reason || "upstream_rate_limited",
-    });
-  }
-
-  const res = await requestFleet("/api/v1/proxy/report-exhausted/batch", {
-    method: "POST",
-    body: JSON.stringify({ reports: items }),
-  });
-
-  if (!res.ok) {
-    g.lastError = res.error;
-    return { ok: false, error: res.error, reported: 0 };
-  }
-
-  const now = new Date().toISOString();
-  for (const url of g.exhaustedPending.keys()) {
-    const pool = await getProxyPoolByUrl(url);
-    if (pool) {
-      await updateProxyPool(pool.id, {
-        testStatus: "error",
-        isActive: false,
-        lastTestedAt: now,
-        lastError: "exhausted reported to fleet",
-        updatedAt: now,
-      });
-    }
-  }
-  g.exhaustedPending.clear();
-  g.lastError = null;
-  return { ok: true, reported: items.length };
-}
-
-async function getProxyPoolByUrl(proxyUrl) {
-  const pools = await getProxyPools();
-  return pools.find((p) => poolKey(p) === String(proxyUrl || "").trim()) || null;
-}
-
-/**
  * Hook called by auth.js markAccountUnavailable: when an upstream rate limit /
  * quota-exhaustion failure happens on a provider that runs through fleet-owned
- * proxies, queue the used fleet proxy for the next batch report. Fail-open:
+ * proxies, mark the current proxy as exhausted in the fleet pool. Fail-open:
  * unknown provider / non-fleet pool / fleet disabled → no-op, never throws.
  */
 export async function maybeReportFleetExhaustion({ provider, connection, status, errorText }) {
@@ -315,7 +286,7 @@ export async function maybeReportFleetExhaustion({ provider, connection, status,
     const poolId = connection?.providerSpecificData?.proxyPoolId;
     if (!poolId) return;
     const pool = await getProxyPoolById(poolId);
-    if (!pool || !isFleetPool(pool)) return;
+    if (!pool || pool.type !== "fleet") return;
 
     const s = Number(status);
     const text = String(errorText || "");
@@ -323,8 +294,16 @@ export async function maybeReportFleetExhaustion({ provider, connection, status,
     const isQuotaExhausted = /quota|billing|insufficient|payment/i.test(text);
     if (!isRateLimit && !isQuotaExhausted) return;
 
-    const reason = isQuotaExhausted ? "upstream_quota_exhausted" : "upstream_rate_limited";
-    markFleetProxyExhausted(pool.proxyUrl, { reason });
+    // Get the current proxy being used from rotation
+    const proxyUrls = pool.proxyUrls || [];
+    const currentIndex = pool.currentIndex || 0;
+    if (proxyUrls.length === 0) return;
+    
+    const currentProxy = proxyUrls[currentIndex % proxyUrls.length];
+    if (!currentProxy) return;
+
+    await markProxyExhausted(pool.id, currentProxy);
+    console.log(`[FleetSync] marked exhausted: ${currentProxy} in pool ${pool.name}`);
   } catch (e) {
     console.warn(`[FleetSync] exhaustion hook error: ${e?.message || e}`);
   }
@@ -337,15 +316,33 @@ async function runTick() {
     await refreshFleetConfig();
     if (!isFleetEnabled()) return;
 
-    // Report exhausted first so the next batch request returns fresh proxies.
-    await flushExhaustedReports();
-    const sync = await syncFleetProxies();
-    if (sync.ok) {
+    const c = cfg();
+    let totalAdded = 0;
+    let totalUpdated = 0;
+
+    // Check and report exhausted proxies for each pool, then sync if needed
+    for (const poolId of c.pools) {
+      try {
+        const exhaustCheck = await checkAndReportExhausted(poolId);
+        
+        if (exhaustCheck.shouldSync) {
+          const syncResult = await syncFleetPool(poolId);
+          totalAdded += syncResult.added;
+          totalUpdated += syncResult.updated;
+          
+          if (!syncResult.ok) {
+            console.warn(`[FleetSync] pool=${poolId} sync failed: ${syncResult.error}`);
+          }
+        }
+      } catch (e) {
+        console.warn(`[FleetSync] pool=${poolId} tick error: ${e?.message || e}`);
+      }
+    }
+
+    if (totalAdded > 0 || totalUpdated > 0) {
       console.log(
-        `[FleetSync] pools=[${cfg().pools.join(",")}] assigned=${sync.assignments} added=${sync.added} updated=${sync.updated}`
+        `[FleetSync] pools=[${c.pools.join(",")}] added=${totalAdded} updated=${totalUpdated}`
       );
-    } else {
-      console.warn(`[FleetSync] batch failed (${sync.failed}/${cfg().pools.length} pools)`);
     }
   } catch (e) {
     g.lastError = e?.message || String(e);

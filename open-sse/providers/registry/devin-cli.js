@@ -3,7 +3,7 @@ export default {
   alias: "dv",
   aliases: ["devin"],
   uiAlias: "dv",
-  hidden: true,
+  hidden: false,
   display: {
     name: "Devin CLI",
     icon: "smart_toy",

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
-import { Badge, Button, Card, CardSkeleton, Input, Modal, Toggle, ConfirmModal } from "@/shared/components";
+import { Badge, Button, Card, CardSkeleton, Input, Modal, Toggle, ConfirmModal, MultiSelect } from "@/shared/components";
 import { useNotificationStore } from "@/store/notificationStore";
 
 function getStatusVariant(status) {
@@ -54,6 +54,10 @@ export default function ProxyPoolsPage() {
   const [fleet, setFleet] = useState(null);
   const [fleetForm, setFleetForm] = useState(null);
   const [fleetSaving, setFleetSaving] = useState(false);
+  const [providersList, setProvidersList] = useState([]);
+  const [loadingProviders, setLoadingProviders] = useState(true);
+  const [fleetPoolsList, setFleetPoolsList] = useState([]);
+  const [loadingFleetPools, setLoadingFleetPools] = useState(false);
   const relayMenuRef = useRef(null);
   const notify = useNotificationStore();
 
@@ -83,18 +87,66 @@ export default function ProxyPoolsPage() {
     }
   }, []);
 
+  const fetchProvidersList = useCallback(async () => {
+    try {
+      const res = await fetch("/api/providers/list", { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok) {
+        setProvidersList(data.providers || []);
+      }
+    } catch (error) {
+      console.log("Error fetching providers list:", error);
+    } finally {
+      setLoadingProviders(false);
+    }
+  }, []);
+
+  const fetchFleetPools = useCallback(async (baseUrl, apiKey) => {
+    if (!baseUrl) {
+      setFleetPoolsList([]);
+      return;
+    }
+    setLoadingFleetPools(true);
+    try {
+      const res = await fetch(
+        `/api/proxy-pools/fleet-pools?baseUrl=${encodeURIComponent(baseUrl)}&apiKey=${encodeURIComponent(apiKey || "")}`,
+        { cache: "no-store" }
+      );
+      const data = await res.json();
+      if (res.ok) {
+        setFleetPoolsList(data.pools || []);
+      } else {
+        setFleetPoolsList([]);
+      }
+    } catch (error) {
+      console.log("Error fetching fleet pools:", error);
+      setFleetPoolsList([]);
+    } finally {
+      setLoadingFleetPools(false);
+    }
+  }, []);
+
   const fetchFleetSettings = useCallback(async () => {
     try {
       const res = await fetch("/api/settings", { cache: "no-store" });
       const data = await res.json();
       if (res.ok && data.proxyFleet) {
         setFleet(data.proxyFleet);
+        // Parse providers string into array for MultiSelect
+        const providersArray = data.proxyFleet.providers
+          ? data.proxyFleet.providers.split(",").map((s) => s.trim()).filter(Boolean)
+          : [];
+        // Parse pools string into array for MultiSelect
+        const poolsArray = data.proxyFleet.pools
+          ? data.proxyFleet.pools.split(",").map((s) => s.trim()).filter(Boolean)
+          : [];
         setFleetForm({
           enabled: data.proxyFleet.enabled === true,
           baseUrl: data.proxyFleet.baseUrl || "",
           apiKey: "", // never sent back by the server
-          pools: data.proxyFleet.pools || "",
-          providers: data.proxyFleet.providers || "",
+          adminKey: data.proxyFleet.adminKey || "", // for fetching pools (separate from apiKey)
+          pools: poolsArray,
+          providers: providersArray,
           batchLimit: data.proxyFleet.batchLimit || 500,
           tickIntervalMs: data.proxyFleet.tickIntervalMs || 45000,
           requestTimeoutMs: data.proxyFleet.requestTimeoutMs || 5000,
@@ -109,27 +161,46 @@ export default function ProxyPoolsPage() {
   const handleSaveFleet = async () => {
     setFleetSaving(true);
     try {
+      // Build proxyFleet object - only include keys if user provided a new value
+      const proxyFleetPayload = {
+        enabled: fleetForm.enabled === true,
+        baseUrl: fleetForm.baseUrl.trim(),
+        pools: Array.isArray(fleetForm.pools)
+          ? fleetForm.pools.join(",")
+          : (typeof fleetForm.pools === "string" ? fleetForm.pools.trim() : ""),
+        providers: Array.isArray(fleetForm.providers)
+          ? fleetForm.providers.join(",")
+          : fleetForm.providers.trim(),
+        batchLimit: Number(fleetForm.batchLimit) || 500,
+        tickIntervalMs: Number(fleetForm.tickIntervalMs) || 45000,
+        requestTimeoutMs: Number(fleetForm.requestTimeoutMs) || 5000,
+        reportBatchSize: Number(fleetForm.reportBatchSize) || 100,
+      };
+      
+      // Only send apiKey if user entered a new value (non-empty)
+      // Empty string means "keep existing" - backend will preserve the stored key
+      if (fleetForm.apiKey.trim()) {
+        proxyFleetPayload.apiKey = fleetForm.apiKey.trim();
+      } else {
+        proxyFleetPayload.apiKey = ""; // Signal to backend to keep existing
+      }
+      
+      // Only send adminKey if user entered a new value (non-empty)
+      if (fleetForm.adminKey.trim()) {
+        proxyFleetPayload.adminKey = fleetForm.adminKey.trim();
+      } else {
+        proxyFleetPayload.adminKey = ""; // Signal to backend to keep existing
+      }
+
       const res = await fetch("/api/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          proxyFleet: {
-            enabled: fleetForm.enabled === true,
-            baseUrl: fleetForm.baseUrl.trim(),
-            apiKey: fleetForm.apiKey.trim(), // empty = keep existing
-            pools: fleetForm.pools.trim(),
-            providers: fleetForm.providers.trim(),
-            batchLimit: Number(fleetForm.batchLimit) || 500,
-            tickIntervalMs: Number(fleetForm.tickIntervalMs) || 45000,
-            requestTimeoutMs: Number(fleetForm.requestTimeoutMs) || 5000,
-            reportBatchSize: Number(fleetForm.reportBatchSize) || 100,
-          },
-        }),
+        body: JSON.stringify({ proxyFleet: proxyFleetPayload }),
       });
       const data = await res.json();
       if (res.ok) {
         setFleet(data.proxyFleet);
-        setFleetForm((prev) => ({ ...prev, apiKey: "" }));
+        setFleetForm((prev) => ({ ...prev, apiKey: "", adminKey: "" }));
         notify.success("Proxy fleet settings saved");
       } else {
         notify.error(data.error || "Failed to save proxy fleet settings");
@@ -147,7 +218,16 @@ export default function ProxyPoolsPage() {
   useEffect(() => {
     fetchProxyPools();
     fetchFleetSettings();
-  }, [fetchProxyPools, fetchFleetSettings]);
+    fetchProvidersList();
+  }, [fetchProxyPools, fetchFleetSettings, fetchProvidersList]);
+
+  // Fetch fleet pools when baseUrl changes (after fleetSettings is loaded)
+  useEffect(() => {
+    if (fleetForm?.baseUrl) {
+      // Send API key from form if user entered a new one, otherwise empty (API endpoint will fetch stored key)
+      fetchFleetPools(fleetForm.baseUrl, fleetForm.adminKey);
+    }
+  }, [fleetForm?.baseUrl, fleetForm?.apiKey]);
 
   const resetForm = () => {
     setEditingProxyPool(null);
@@ -747,18 +827,30 @@ export default function ProxyPoolsPage() {
                 hint={fleet?.hasApiKey ? "An API key is already saved; leaving this empty keeps it." : "Required to authenticate with the fleet."}
               />
               <Input
-                label="Pool IDs (comma-separated)"
-                value={fleetForm.pools}
-                onChange={(e) => setFleetForm((prev) => ({ ...prev, pools: e.target.value }))}
-                placeholder="mimo,opencode"
-                hint="One batch request per pool. Example: mimo,opencode,default"
+                label="Admin Key"
+                type="password"
+                value={fleetForm.adminKey}
+                onChange={(e) => setFleetForm((prev) => ({ ...prev, adminKey: e.target.value }))}
+                placeholder="Admin key for fetching pools"
+                hint="Used to fetch available pools from Fleet API (separate from API Key)."
               />
-              <Input
-                label="Providers (comma-separated)"
-                value={fleetForm.providers}
-                onChange={(e) => setFleetForm((prev) => ({ ...prev, providers: e.target.value }))}
-                placeholder="opencode-go,xiaomi-mimo"
+              <MultiSelect
+                label="Pool IDs"
+                options={fleetPoolsList.map((p) => ({ value: p.id || p, label: p.name || p.id || p }))}
+                value={Array.isArray(fleetForm.pools) ? fleetForm.pools : (typeof fleetForm.pools === "string" && fleetForm.pools ? fleetForm.pools.split(",").map((s) => s.trim()).filter(Boolean) : [])}
+                onChange={(selected) => setFleetForm((prev) => ({ ...prev, pools: selected }))}
+                placeholder={loadingFleetPools ? "Loading pools..." : fleetPoolsList.length === 0 ? "No pools available (check Fleet Base URL)" : "Select pools..."}
+                hint="One batch request per pool. Fetched from Fleet Base URL."
+                disabled={loadingFleetPools || fleetSaving || !fleetForm?.baseUrl}
+              />
+              <MultiSelect
+                label="Providers"
+                options={providersList.map((p) => ({ value: p.id, label: p.name || p.id }))}
+                value={Array.isArray(fleetForm.providers) ? fleetForm.providers : []}
+                onChange={(selected) => setFleetForm((prev) => ({ ...prev, providers: selected }))}
+                placeholder="Select providers..."
                 hint="Upstream failures (429/quota) on these providers mark the fleet proxy as exhausted."
+                disabled={loadingProviders || fleetSaving}
               />
               <Input
                 label="Batch Limit"

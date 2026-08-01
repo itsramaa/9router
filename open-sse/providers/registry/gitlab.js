@@ -1,6 +1,6 @@
 export default {
   id: "gitlab",
-  hidden: true,
+  hidden: false,
   priority: 100,
   display: {
     name: "GitLab Duo",

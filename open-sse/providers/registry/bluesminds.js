@@ -3,7 +3,7 @@ export default {
   alias: "bm",
   aliases: ["blue-sminds"],
   uiAlias: "bm",
-  hidden: true,
+  hidden: false,
   display: {
     name: "BluesMinds",
     icon: "psychology",

@@ -366,27 +366,117 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Provider returned error
   if (!providerResponse.ok) {
-    trackPendingRequest(model, provider, connectionId, false, true);
     const { statusCode, message, resetsAtMs } = await parseUpstreamError(providerResponse, executor);
-    appendRequestLog({ model, provider, connectionId, status: `FAILED ${statusCode}` }).catch(() => { });
-    saveRequestDetail(buildRequestDetail({
-      provider, model, connectionId,
-      latency: { ttft: 0, total: Date.now() - requestStartTime },
-      tokens: { prompt_tokens: 0, completion_tokens: 0 },
-      request: extractRequestConfig(body, stream),
-      providerRequest: finalBody || translatedBody || null,
-      response: { error: message, status: statusCode, thinking: null },
-      pxpipe: pxpipeSummary,
-      status: "error"
-    })).catch(() => { });
+    
+    // Detect content length errors and attempt auto-truncation + retry
+    const isContentLengthError = statusCode === 400 && 
+      (message.toLowerCase().includes("content length exceeds") || 
+       message.toLowerCase().includes("content_length_exceeds_threshold"));
+    
+    if (isContentLengthError && translatedBody.messages?.length > 5) {
+      log?.warn?.("TRUNCATE", `Content length exceeded, attempting auto-truncation + retry`);
+      
+      // Apply RTK compression if not already applied
+      if (tokenSaverEnabled && rtkEnabled && !rtkStats.totalSaved) {
+        const retryRtkStats = compressMessages(translatedBody, true);
+        if (retryRtkStats.totalSaved > 0) {
+          log?.info?.("TRUNCATE", `Applied RTK compression: saved ${retryRtkStats.totalSaved} tokens`);
+        }
+      }
+      
+      // Further reduce: keep system message + last 5 messages
+      const systemMsg = translatedBody.messages.find(m => m.role === "system");
+      const last5 = translatedBody.messages.filter(m => m.role !== "system").slice(-5);
+      const originalCount = translatedBody.messages.length;
+      translatedBody.messages = systemMsg ? [systemMsg, ...last5] : last5;
+      log?.info?.("TRUNCATE", `Reduced messages: ${originalCount} → ${translatedBody.messages.length}`);
+      
+      // Retry with truncated body
+      try {
+        const retryResult = await executor.execute({ 
+          model, 
+          body: translatedBody, 
+          stream, 
+          credentials, 
+          signal: streamController.signal, 
+          log, 
+          proxyOptions 
+        });
+        
+        if (retryResult.response.ok) {
+          log?.warn?.("TRUNCATE", `✓ Retry succeeded after truncation (${originalCount} → ${translatedBody.messages.length} msgs)`);
+          providerResponse = retryResult.response;
+          providerUrl = retryResult.url;
+          providerHeaders = retryResult.headers;
+          finalBody = retryResult.transformedBody;
+          providerResponseFormat = retryResult.responseFormat || targetFormat;
+          reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
+          // Continue to normal streaming/non-streaming flow below
+        } else {
+          // Retry failed, fall through to error handling
+          const { statusCode: retryStatus, message: retryMsg } = await parseUpstreamError(retryResult.response, executor);
+          trackPendingRequest(model, provider, connectionId, false, true);
+          appendRequestLog({ model, provider, connectionId, status: `FAILED ${retryStatus}` }).catch(() => { });
+          saveRequestDetail(buildRequestDetail({
+            provider, model, connectionId,
+            latency: { ttft: 0, total: Date.now() - requestStartTime },
+            tokens: { prompt_tokens: 0, completion_tokens: 0 },
+            request: extractRequestConfig(body, stream),
+            providerRequest: finalBody || translatedBody || null,
+            response: { error: `Truncation retry failed: ${retryMsg}`, status: retryStatus, thinking: null },
+            pxpipe: pxpipeSummary,
+            status: "error"
+          })).catch(() => { });
+          
+          const errMsg = `Content too long. Auto-truncation attempted but failed. Try reducing conversation history or message length.\n\nOriginal error: ${message}\nRetry error: ${retryMsg}`;
+          if (log?.errorLine) {
+            log.errorLine(reqTag, "✗", `ERROR ${retryStatus} · ${provider}/${model} · ${Date.now() - requestStartTime}ms\n    ${errMsg}`);
+          }
+          return createErrorResult(retryStatus, errMsg, resetsAtMs);
+        }
+      } catch (retryError) {
+        trackPendingRequest(model, provider, connectionId, false, true);
+        appendRequestLog({ model, provider, connectionId, status: `FAILED 502` }).catch(() => { });
+        saveRequestDetail(buildRequestDetail({
+          provider, model, connectionId,
+          latency: { ttft: 0, total: Date.now() - requestStartTime },
+          tokens: { prompt_tokens: 0, completion_tokens: 0 },
+          request: extractRequestConfig(body, stream),
+          providerRequest: finalBody || translatedBody || null,
+          response: { error: `Truncation retry threw: ${retryError.message}`, status: 502, thinking: null },
+          pxpipe: pxpipeSummary,
+          status: "error"
+        })).catch(() => { });
+        
+        const errMsg = `Content too long. Auto-truncation attempted but retry failed.\n\nOriginal error: ${message}\nRetry error: ${retryError.message}`;
+        if (log?.errorLine) {
+          log.errorLine(reqTag, "✗", `ERROR 502 · ${provider}/${model} · ${Date.now() - requestStartTime}ms\n    ${errMsg}`);
+        }
+        return createErrorResult(HTTP_STATUS.BAD_GATEWAY, errMsg);
+      }
+    } else {
+      // Not a content length error, or no messages to truncate - handle normally
+      trackPendingRequest(model, provider, connectionId, false, true);
+      appendRequestLog({ model, provider, connectionId, status: `FAILED ${statusCode}` }).catch(() => { });
+      saveRequestDetail(buildRequestDetail({
+        provider, model, connectionId,
+        latency: { ttft: 0, total: Date.now() - requestStartTime },
+        tokens: { prompt_tokens: 0, completion_tokens: 0 },
+        request: extractRequestConfig(body, stream),
+        providerRequest: finalBody || translatedBody || null,
+        response: { error: message, status: statusCode, thinking: null },
+        pxpipe: pxpipeSummary,
+        status: "error"
+      })).catch(() => { });
 
-    const errMsg = formatProviderError(new Error(message), provider, model, statusCode);
-    if (log?.errorLine) {
-      const urlStr = providerUrl ? `\n    URL: ${providerUrl}` : "";
-      log.errorLine(reqTag, "✗", `ERROR ${statusCode} · ${provider}/${model} · ${Date.now() - requestStartTime}ms${urlStr}\n    ${errMsg}`);
+      const errMsg = formatProviderError(new Error(message), provider, model, statusCode);
+      if (log?.errorLine) {
+        const urlStr = providerUrl ? `\n    URL: ${providerUrl}` : "";
+        log.errorLine(reqTag, "✗", `ERROR ${statusCode} · ${provider}/${model} · ${Date.now() - requestStartTime}ms${urlStr}\n    ${errMsg}`);
+      }
+      reqLogger.logError(new Error(message), finalBody || translatedBody);
+      return createErrorResult(statusCode, errMsg, resetsAtMs);
     }
-    reqLogger.logError(new Error(message), finalBody || translatedBody);
-    return createErrorResult(statusCode, errMsg, resetsAtMs);
   }
 
   const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };

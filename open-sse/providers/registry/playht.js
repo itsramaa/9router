@@ -32,5 +32,5 @@ export default {
       }
     ]
   },
-  hidden: true
+  hidden: false
 };
