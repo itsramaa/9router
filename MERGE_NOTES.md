@@ -479,7 +479,71 @@ pool-list `<Card>`.
 
 ---
 
-### C16. `open-sse/translator/request/openai-to-kiro.js` + `open-sse/translator/request/claude-to-kiro.js` — low conflict (local-only)
+### C16. `src/app/(dashboard)/dashboard/providers/[id]/page.js` — low conflict
+
+**Change**: Added bulk activate/deactivate buttons for selected connections.
+
+Two new handlers and UI buttons:
+
+```js
+const handleBulkActivate = async () => {
+  if (selectedConnectionIds.length === 0) return;
+  const toRestore = connections.filter(
+    (c) => selectedConnectionIds.includes(c.id) && c.disabledByProviderToggle === true
+  );
+  const ids = toRestore.length > 0 ? toRestore.map((c) => c.id) : selectedConnectionIds;
+  for (const id of ids) {
+    await fetch(`/api/providers/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ isActive: true, disabledByProviderToggle: null }),
+    });
+  }
+  await fetchConnections();
+  setSelectedConnectionIds([]);
+};
+
+const handleBulkDeactivate = async () => {
+  if (selectedConnectionIds.length === 0) return;
+  const toDisable = connections.filter(
+    (c) => selectedConnectionIds.includes(c.id) && c.isActive !== false
+  );
+  const ids = toDisable.length > 0 ? toDisable.map((c) => c.id) : selectedConnectionIds;
+  for (const id of ids) {
+    await fetch(`/api/providers/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ isActive: false, disabledByProviderToggle: true }),
+    });
+  }
+  await fetchConnections();
+  setSelectedConnectionIds([]);
+};
+```
+
+UI buttons (shown when connections are selected, alongside Delete Selected):
+
+```jsx
+{selectedConnectionIds.length > 0 && (
+  <>
+    <Button size="sm" variant="secondary" icon="toggle_on" onClick={handleBulkActivate}>
+      Activate
+    </Button>
+    <Button size="sm" variant="secondary" icon="toggle_off" onClick={handleBulkDeactivate}>
+      Deactivate
+    </Button>
+    <Button size="sm" variant="danger" icon="delete" onClick={handleBulkDelete}>
+      Delete Selected ({selectedConnectionIds.length})
+    </Button>
+  </>
+)}
+```
+
+**Re-apply**: On conflict, keep both handlers and their button block. The `disabledByProviderToggle` flag is important for lifecycle tracking.
+
+---
+
+### C17. `open-sse/translator/request/openai-to-kiro.js` + `open-sse/translator/request/claude-to-kiro.js` — low conflict (local-only)
 
 **Change**: The `systemPrompt` line is now **commented out** in both Kiro
 request translators so the upstream `systemPrompt` field is NOT sent to
@@ -543,10 +607,11 @@ node --check open-sse/services/modelLockStore.js
 node --check open-sse/services/modelLockCleanup.js
 node --check open-sse/executors/opencode.js
 
-# UI (4 files)
+# UI (5 files)
 node --check "src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js"
 node --check "src/app/(dashboard)/dashboard/providers/components/ConnectionsCard.js"
 node --check "src/app/(dashboard)/dashboard/providers/page.js"
+node --check "src/app/(dashboard)/dashboard/providers/[id]/page.js"
 node --check "src/app/api/providers/[id]/test/testUtils.js"
 
 # OAuth import routes (2 files)

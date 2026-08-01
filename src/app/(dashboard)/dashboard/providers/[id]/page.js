@@ -746,6 +746,48 @@ export default function ProviderDetailPage() {
     });
   };
 
+  const handleBulkActivate = async () => {
+    if (selectedConnectionIds.length === 0) return;
+    const toRestore = connections.filter(
+      (c) => selectedConnectionIds.includes(c.id) && c.disabledByProviderToggle === true
+    );
+    const ids = toRestore.length > 0 ? toRestore.map((c) => c.id) : selectedConnectionIds;
+    for (const id of ids) {
+      try {
+        await fetch(`/api/providers/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isActive: true, disabledByProviderToggle: null }),
+        });
+      } catch (e) {
+        console.log("Error activating connection:", id, e);
+      }
+    }
+    await fetchConnections();
+    setSelectedConnectionIds([]);
+  };
+
+  const handleBulkDeactivate = async () => {
+    if (selectedConnectionIds.length === 0) return;
+    const toDisable = connections.filter(
+      (c) => selectedConnectionIds.includes(c.id) && c.isActive !== false
+    );
+    const ids = toDisable.length > 0 ? toDisable.map((c) => c.id) : selectedConnectionIds;
+    for (const id of ids) {
+      try {
+        await fetch(`/api/providers/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isActive: false, disabledByProviderToggle: true }),
+        });
+      } catch (e) {
+        console.log("Error deactivating connection:", id, e);
+      }
+    }
+    await fetchConnections();
+    setSelectedConnectionIds([]);
+  };
+
   const handleOAuthSuccess = () => {
     fetchConnections();
     setShowOAuthModal(false);
@@ -1436,14 +1478,32 @@ export default function ProviderDetailPage() {
               {connections.length > 0 && (
                 <>
                   {selectedConnectionIds.length > 0 && (
-                    <Button
-                      size="sm"
-                      variant="danger"
-                      icon="delete"
-                      onClick={handleBulkDelete}
-                    >
-                      Delete Selected ({selectedConnectionIds.length})
-                    </Button>
+                    <>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        icon="toggle_on"
+                        onClick={handleBulkActivate}
+                      >
+                        Activate
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        icon="toggle_off"
+                        onClick={handleBulkDeactivate}
+                      >
+                        Deactivate
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        icon="delete"
+                        onClick={handleBulkDelete}
+                      >
+                        Delete Selected ({selectedConnectionIds.length})
+                      </Button>
+                    </>
                   )}
                   <Button
                     size="sm"
