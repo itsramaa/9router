@@ -369,27 +369,49 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const { statusCode, message, resetsAtMs } = await parseUpstreamError(providerResponse, executor);
     
     // Detect content length errors and attempt auto-truncation + retry
-    const isContentLengthError = statusCode === 400 && 
-      (message.toLowerCase().includes("content length exceeds") || 
+    const isContentLengthError = statusCode === 400 &&
+      (message.toLowerCase().includes("content length exceeds") ||
        message.toLowerCase().includes("content_length_exceeds_threshold"));
-    
-    if (isContentLengthError && translatedBody.messages?.length > 5) {
+
+    // Support both OpenAI format (messages) and Kiro format (conversationState)
+    const messageCount = translatedBody.messages?.length || 0;
+    const historyCount = translatedBody.conversationState?.history?.length || 0;
+    const totalHistoryMessages = historyCount + (translatedBody.conversationState?.currentMessage ? 1 : 0);
+
+    if (isContentLengthError && (messageCount > 5 || totalHistoryMessages > 5)) {
       log?.warn?.("TRUNCATE", `Content length exceeded, attempting auto-truncation + retry`);
-      
+
       // Apply RTK compression if not already applied
-      if (tokenSaverEnabled && rtkEnabled && !rtkStats.totalSaved) {
+      const rtkSavings = rtkStats ? (rtkStats.bytesBefore - rtkStats.bytesAfter) : 0;
+      if (tokenSaverEnabled && rtkEnabled && rtkSavings === 0) {
         const retryRtkStats = compressMessages(translatedBody, true);
-        if (retryRtkStats.totalSaved > 0) {
-          log?.info?.("TRUNCATE", `Applied RTK compression: saved ${retryRtkStats.totalSaved} tokens`);
+        const saved = retryRtkStats ? (retryRtkStats.bytesBefore - retryRtkStats.bytesAfter) : 0;
+        if (saved > 0) {
+          log?.info?.("TRUNCATE", `Applied RTK compression: saved ${saved} bytes`);
         }
       }
-      
+
       // Further reduce: keep system message + last 5 messages
-      const systemMsg = translatedBody.messages.find(m => m.role === "system");
-      const last5 = translatedBody.messages.filter(m => m.role !== "system").slice(-5);
-      const originalCount = translatedBody.messages.length;
-      translatedBody.messages = systemMsg ? [systemMsg, ...last5] : last5;
-      log?.info?.("TRUNCATE", `Reduced messages: ${originalCount} → ${translatedBody.messages.length}`);
+      if (messageCount > 0 && !translatedBody.conversationState) {
+        // OpenAI format truncation (original logic)
+        const systemMsg = translatedBody.messages.find(m => m.role === "system");
+        const last5 = translatedBody.messages.filter(m => m.role !== "system").slice(-5);
+        const originalCount = translatedBody.messages.length;
+        translatedBody.messages = systemMsg ? [systemMsg, ...last5] : last5;
+        log?.info?.("TRUNCATE", `Reduced messages: ${originalCount} → ${translatedBody.messages.length}`);
+      } else if (totalHistoryMessages > 0) {
+        // Kiro format truncation
+        const state = translatedBody.conversationState;
+        const originalHistoryCount = state.history?.length || 0;
+        const originalCurrentMessage = state.currentMessage ? 1 : 0;
+        const originalTotal = originalHistoryCount + originalCurrentMessage;
+
+        // Keep last 5 history messages + current message
+        if (state.history?.length > 5) {
+          state.history = state.history.slice(-5);
+        }
+        log?.info?.("TRUNCATE", `Reduced Kiro history: ${originalHistoryCount} → ${state.history?.length || 0} (+ current message)`);
+      }
       
       // Retry with truncated body
       try {
@@ -404,7 +426,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         });
         
         if (retryResult.response.ok) {
-          log?.warn?.("TRUNCATE", `✓ Retry succeeded after truncation (${originalCount} → ${translatedBody.messages.length} msgs)`);
+          const isKiro = !!translatedBody.conversationState;
+          const newCount = isKiro
+            ? `${translatedBody.conversationState?.history?.length || 0} hist + curr`
+            : `${translatedBody.messages?.length || 0} msgs`;
+          log?.warn?.("TRUNCATE", `✓ Retry succeeded after truncation (${isKiro ? 'Kiro' : 'OpenAI'} format, ${newCount})`);
           providerResponse = retryResult.response;
           providerUrl = retryResult.url;
           providerHeaders = retryResult.headers;

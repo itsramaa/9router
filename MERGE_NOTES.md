@@ -651,6 +651,36 @@ if (additionalModelRequestFields) {
 
 ---
 
+### C26. `open-sse/handlers/chatCore.js` — low conflict
+
+**Change**: Fixed auto-truncation logic for Kiro requests. Previously, the content-length error retry only worked for OpenAI format (`messages` array) but Kiro uses `conversationState`, so truncation never triggered for Kiro requests. This caused the same oversized payload to be sent to each account, resulting in cascading 400 errors.
+
+**Changes**:
+1. **Fixed condition check** - Now supports both formats:
+   ```js
+   const messageCount = translatedBody.messages?.length || 0;
+   const historyCount = translatedBody.conversationState?.history?.length || 0;
+   const totalHistoryMessages = historyCount + (translatedBody.conversationState?.currentMessage ? 1 : 0);
+   ```
+
+2. **Added Kiro-specific truncation** - Truncates `conversationState.history` to last 5 messages:
+   ```js
+   if (state.history?.length > 5) {
+     state.history = state.history.slice(-5);
+   }
+   ```
+
+3. **Fixed RTK stats check** - Changed from non-existent `totalSaved` to proper calculation:
+   ```js
+   const rtkSavings = rtkStats ? (rtkStats.bytesBefore - rtkStats.bytesAfter) : 0;
+   ```
+
+4. **Updated success log** - Works for both Kiro and OpenAI formats.
+
+**Re-apply**: If upstream rewrites the truncation logic, ensure the condition checks both `messages` (OpenAI) and `conversationState.history` (Kiro). The Kiro truncation should slice `history` to last 5 items while preserving `currentMessage`. Keep the fixed RTK stats calculation using `bytesBefore - bytesAfter` instead of the non-existent `totalSaved` field.
+
+---
+
 ## DB field compatibility
 
 All new lifecycle fields are stored in the JSON `data` column of
