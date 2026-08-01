@@ -479,6 +479,28 @@ pool-list `<Card>`.
 
 ---
 
+### C16. `open-sse/translator/request/openai-to-kiro.js` + `open-sse/translator/request/claude-to-kiro.js` — low conflict (local-only)
+
+**Change**: The `systemPrompt` line is now **commented out** in both Kiro
+request translators so the upstream `systemPrompt` field is NOT sent to
+CodeWhisperer. The thinking prefix / agentic prompt / system instruction still
+flow through the `contentPrefix` fallback injected into the conversation, which
+is what makes it work on the direct-call surface.
+
+In both files the payload block is:
+
+```js
+if (profileArn) payload.profileArn = profileArn;
+// if (systemPrompt) payload.systemPrompt = systemPrompt;
+if (additionalModelRequestFields) {
+  payload.additionalModelRequestFields = additionalModelRequestFields;
+}
+```
+
+**Re-apply**: On conflict, keep the `// if (systemPrompt) payload.systemPrompt = systemPrompt;` line **commented out** in both files. If upstream un-comments or rewrites the line, re-apply the comment. The `systemPrompt` variable must stay (still used for `contentPrefix` / session replay) — only the payload assignment is disabled.
+
+---
+
 ## DB field compatibility
 
 All new lifecycle fields are stored in the JSON `data` column of
