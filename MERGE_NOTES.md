@@ -91,6 +91,9 @@ endpoints still work (backward compat). Upstream has no equivalent feature.
 |---|---|
 | `src/shared/services/proxyFleetSync.js` | `cfg()` (runtime overrides from settings, env as defaults) / `isFleetEnabled()` / `syncFleetProxies()` (loop over `FLEET_POOLS`) / `syncFleetPool(poolId)` / `markFleetProxyExhausted(proxyUrl, reason)` (in-memory queue) / `flushExhaustedReports()` / `maybeReportFleetExhaustion({provider, connection, status, errorText})` (429/quota hook, fail-open) / `reconfigureProxyFleetSync()` (restart scheduler after settings change) / `startProxyFleetSync()` / `stopProxyFleetSync()` |
 | `src/app/api/fleet/sync-now/route.js` | POST `/api/fleet/sync-now` — manual trigger of `syncFleetProxies()` (used by the dashboard Sync Now button) |
+| `src/app/api/proxy-pools/fleet-pools/route.js` | GET `/api/proxy-pools/fleet-pools?baseUrl=...&apiKey=...` — fetch available pool list from fleet aggregator (`GET /api/v1/pools`), returns `{pools: [{id, name}]}` for UI dropdown population (5s timeout, fail-open) |
+| `src/app/api/providers/list/route.js` | GET `/api/providers/list` — returns all provider IDs, aliases, and display names from `PROVIDERS` registry for UI dropdowns (`{providers: [{id, alias, name}]}`) |
+| `src/shared/components/MultiSelect.js` | Multi-select dropdown component with tag display, clear all, click-outside handling — used for fleet provider selection in proxy-pools UI |
 | `tests/unit/proxyFleetSync.test.js` | Unit test for batch sync + exhaustion report (6 cases) |
 
 **Merge strategy**: `proxyFleetSync.js` imports `getProxyPoolById`,
@@ -543,7 +546,90 @@ UI buttons (shown when connections are selected, alongside Delete Selected):
 
 ---
 
-### C17. `open-sse/translator/request/openai-to-kiro.js` + `open-sse/translator/request/claude-to-kiro.js` — low conflict (local-only)
+### C17. `src/lib/network/connectionProxy.js` — medium conflict
+
+**Change**: Added fleet pool type handling with round-robin rotation:
+- Imports `rotateProxy` from `proxyPoolsRepo`.
+- New `type === "fleet"` branch between the `unified` and standard pool blocks.
+- Filters `proxyUrls` to exclude `exhaustedProxies`, throws if all exhausted.
+- Picks current proxy using `currentIndex % activeProxies.length`.
+- Fire-and-forget rotation call: `rotateProxy(proxyPoolId).catch(...)`.
+- Returns `{ source: "fleet", connectionProxyUrl, strictProxy: true }`.
+
+**Re-apply**: If upstream adds new proxy pool types or restructures the resolution logic, keep the fleet block between unified and standard. The fleet type must use strict proxy mode (never falls back to global proxy).
+
+---
+
+### C18. `src/lib/db/repos/proxyPoolsRepo.js` — medium conflict
+
+**Changes**:
+1. Added `rotateProxy(poolId)` — atomic increment of `currentIndex` for round-robin: reads pool, increments `currentIndex`, writes back via `updateProxyPool`. Used by `connectionProxy.js` on each fleet pool request.
+2. Export added to `src/lib/db/index.js` re-export list.
+
+**Re-apply**: Keep `rotateProxy` as a pure addition. If upstream adds other pool mutation functions, insert `rotateProxy` alongside them.
+
+---
+
+### C19. `open-sse/handlers/chatCore.js` — high conflict
+
+**Change**: Added connection-level proxy support that overrides global proxy when a connection has an assigned proxy pool:
+- After credential resolution (inside `executeWithCredentials`), calls `resolveConnectionProxyConfig(connection.proxyPoolId, ...)`.
+- If proxy is enabled, patches `fetchOptions.dispatcher` (undici ProxyAgent) or sets `agent` (Node.js http.Agent/https.Agent tunneling via `tunnel` package).
+- Uses `strictProxy` flag: when true and proxy fails, throws immediately without falling back to global proxy.
+- Imports `resolveConnectionProxyConfig` from `@/lib/network/connectionProxy`.
+
+**Re-apply**: The proxy resolution block goes after credential setup, before the upstream fetch. If upstream restructures `executeWithCredentials`, keep the `resolveConnectionProxyConfig` call and the dispatcher/agent patching logic. The strict-proxy-vs-fallback behavior is critical for fleet pools.
+
+---
+
+### C20. `src/app/(dashboard)/dashboard/proxy-pools/page.js` — high conflict
+
+**Changes** (beyond the fleet card from C15):
+1. **Pool type toggle**: Added radio buttons for `standard` / `unified` / `fleet` types.
+2. **Fleet-specific fields**: "Fetch from Fleet" button that calls `/api/proxy-pools/fleet-pools` to populate the pool ID dropdown from the aggregator's pool list.
+3. **Provider multi-select**: Uses `MultiSelect` component to pick which providers use each fleet pool (stored as `metadata.providers` array).
+4. **Admin key field**: Separate from the fleet sync API key — used only for the fetch-pools request (not stored in pool, only in settings).
+5. **UI state management**: `showFleetForm`, `fleetPools`, `fetchingFleetPools`, `fleetAdminKey` local state.
+
+**Re-apply**: If upstream restructures the proxy-pools page, preserve the type toggle, fleet-specific form fields, and the fetch-pools button. The `MultiSelect` import from `@/shared/components` must stay.
+
+---
+
+### C21. `open-sse/providers/registry/*.js` — low conflict
+
+**Change**: 15 provider registry files had their `noProxy` field updated from a string value to `undefined` or proper array format. This ensures consistency with the connection proxy system (empty string vs undefined distinction).
+
+Affected files: `bluesminds.js`, `cartesia.js`, `coqui.js`, `devin-cli.js`, `gitlab.js`, `iflow.js`, `mimo-free.js`, `mmf.js`, `playht.js`, `qwen.js`, `sambanova.js`, `tortoise.js`, `zed.js`.
+
+**Re-apply**: If upstream adds `noProxy` config to these providers, ensure it's `undefined` (not `""`) when there's no explicit bypass list.
+
+---
+
+### C22. `src/shared/components/index.js` — low conflict
+
+**Change**: Added export for `MultiSelect` component: `export { default as MultiSelect } from "./MultiSelect.js";`
+
+**Re-apply**: One-line addition. Keep it with the other component exports.
+
+---
+
+### C23. `.dockerignore` — low conflict
+
+**Change**: Added `commit_*.txt` / `contribute-to-decolua.sh` / `diagnostic-fleet.js` to ignore list (local dev artifacts).
+
+**Re-apply**: Additive only. If upstream changes `.dockerignore`, merge both sets of patterns.
+
+---
+
+### C24. `package.json` — low conflict
+
+**Change**: Added `tunnel` package to dependencies for HTTPS proxy tunneling in Node.js environments (used by `chatCore.js` when undici is not available).
+
+**Re-apply**: Keep the `tunnel` dependency. If upstream adds other dependencies, merge both.
+
+---
+
+### C25. `open-sse/translator/request/openai-to-kiro.js` + `open-sse/translator/request/claude-to-kiro.js` — low conflict (local-only)
 
 **Change**: The `systemPrompt` line is now **commented out** in both Kiro
 request translators so the upstream `systemPrompt` field is NOT sent to
@@ -606,6 +692,7 @@ node --check open-sse/services/cooldownPolicy.js
 node --check open-sse/services/modelLockStore.js
 node --check open-sse/services/modelLockCleanup.js
 node --check open-sse/executors/opencode.js
+node --check open-sse/handlers/chatCore.js
 
 # UI (5 files)
 node --check "src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js"
@@ -618,12 +705,17 @@ node --check "src/app/api/providers/[id]/test/testUtils.js"
 node --check "src/app/api/oauth/trae/import/route.js"
 node --check "src/app/api/oauth/grok-web/import/route.js"
 
-# Proxy fleet aggregator (6 files)
+# Proxy fleet aggregator (10 files)
 node --check src/shared/services/proxyFleetSync.js
 node --check src/app/api/fleet/sync-now/route.js
+node --check src/app/api/proxy-pools/fleet-pools/route.js
+node --check src/app/api/providers/list/route.js
 node --check src/lib/db/repos/settingsRepo.js
 node --check src/app/api/settings/route.js
+node --check src/lib/db/repos/proxyPoolsRepo.js
+node --check src/lib/network/connectionProxy.js
 node --check "src/app/(dashboard)/dashboard/proxy-pools/page.js"
+node --check src/shared/components/MultiSelect.js
 node --check tests/unit/proxyFleetSync.test.js
 
 # Proxy fleet tests (run from repo root)
