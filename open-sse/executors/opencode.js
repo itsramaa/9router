@@ -1606,7 +1606,7 @@ export class OpenCodeExecutor extends BaseExecutor {
       model,
       body,
     });
-    injectSystemPrompt(next, FORMATS.OPENAI, OPENCODE_SYSTEM_PROMPT);
+    // injectSystemPrompt(next, FORMATS.OPENAI, OPENCODE_SYSTEM_PROMPT);
     return next;
   }
 
